@@ -419,6 +419,11 @@ YAML_FILE = os.getenv("FIX_BUILD_AGENT_PROJECTS_YAML", "projects.yaml")
 SKIP_GH_AUTH_CHECK = os.getenv("FIX_BUILD_AGENT_SKIP_GH_AUTH_CHECK") == "1"
 
 
+def _model_uses_vertex_adc(model_name: str) -> bool:
+    """Returns whether LiteLLM can authenticate through Vertex ADC."""
+    return (model_name or '').lower().startswith('vertex_ai/')
+
+
 def _is_step_2_success(validation_report: dict) -> bool:
     if not isinstance(validation_report, dict):
         return False
@@ -1307,16 +1312,20 @@ if __name__ == "__main__":
     cli_args = parser.parse_args()
     YAML_FILE = cli_args.projects_yaml
     MODEL = cli_args.model
-    api_base = cli_args.api_base
+    api_base = cli_args.api_base or None
     SKIP_GH_AUTH_CHECK = cli_args.skip_gh_auth_check
 
     print("--- Performing pre-startup checks... ---")
     sys.stdout = StreamTee(sys.stdout, GLOBAL_LOGGER)
     sys.stderr = StreamTee(sys.stderr, GLOBAL_LOGGER)
-    if not API_KEY:
-        print("\n[ERROR] Startup failed: API_KEY is not set.")
+    has_model_credentials = bool(API_KEY) or _model_uses_vertex_adc(MODEL)
+    if not has_model_credentials:
+        print("\n[ERROR] Startup failed: API_KEY is not set for this model.")
     else:
-        print("✅ API_KEY is set.")
+        if API_KEY:
+            print("✅ API_KEY is set.")
+        else:
+            print("✅ Vertex AI ADC will be used (no API_KEY required).")
         try:
             if not SKIP_GH_AUTH_CHECK:
                 subprocess.run(["gh", "--version"], check=True, capture_output=True, text=True)

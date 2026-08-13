@@ -106,6 +106,117 @@ FIXER_TOOLS = [{
 DISCOVERY_COMMAND_TIMEOUT_SECONDS = 120
 
 
+def _fix_build_agent_model_config(model_name: str,
+                                  environ: Optional[dict[str, str]] = None
+                                  ) -> dict[str, str]:
+  """Maps an oss-fuzz-gen model name to the bundled agent's LiteLLM config.
+
+  This function only translates configuration. It does not contact a model
+  provider, which makes the provider-specific paths testable without API
+  credentials.
+  """
+  env = environ if environ is not None else os.environ
+  requested = (model_name or '').strip()
+  lower = requested.lower()
+
+  def first(*names: str, default: str = '') -> str:
+    for name in names:
+      value = env.get(name, '').strip()
+      if value:
+        return value
+    return default
+
+  if lower in ('openai_compatible', 'deepseek') or 'deepseek' in lower:
+    model = first('FIX_BUILD_AGENT_MODEL', 'OPENAI_COMPATIBLE_MODEL',
+                  'DEEPSEEK_MODEL', default='deepseek-chat')
+    if not model.startswith('deepseek/'):
+      model = f'deepseek/{model}'
+    return {
+        'model': model,
+        'api_base': first('FIX_BUILD_AGENT_API_BASE',
+                          'OPENAI_COMPATIBLE_BASE_URL', 'DEEPSEEK_BASE_URL',
+                          default='https://api.deepseek.com'),
+        'api_key': first('API_KEY', 'OPENAI_COMPATIBLE_API_KEY',
+                         'DEEPSEEK_API_KEY'),
+        'auth': 'api_key',
+    }
+
+  if lower in ('gpt-3.5-turbo-azure', 'gpt-4-azure', 'gpt-4o-azure') or (
+      'azure' in lower):
+    deployment = first('FIX_BUILD_AGENT_AZURE_DEPLOYMENT',
+                       'AZURE_OPENAI_DEPLOYMENT_NAME',
+                       'AZURE_OPENAI_DEPLOYMENT')
+    if not deployment:
+      raise ValueError(
+          'Azure OpenAI requires FIX_BUILD_AGENT_AZURE_DEPLOYMENT or '
+          'AZURE_OPENAI_DEPLOYMENT_NAME.')
+    return {
+        'model': f'azure/{deployment}',
+        'api_base': first('AZURE_OPENAI_ENDPOINT'),
+        'api_key': first('AZURE_OPENAI_API_KEY'),
+        'api_version': first('AZURE_OPENAI_API_VERSION', default='2024-02-01'),
+        'auth': 'api_key',
+    }
+
+  if lower.startswith('vertex_ai_claude'):
+    claude_models = {
+        'vertex_ai_claude-3-haiku': 'claude-3-haiku@20240307',
+        'vertex_ai_claude-3-opus': 'claude-3-opus@20240229',
+        'vertex_ai_claude-3-5-sonnet': 'claude-3-5-sonnet@20240620',
+    }
+    model = claude_models.get(lower, requested.removeprefix('vertex_ai/'))
+    if not model.startswith('claude-'):
+      model = f'claude-{model}'
+    return {
+        'model': f'vertex_ai/{model}',
+        'api_base': '',
+        'api_key': '',
+        'auth': 'adc',
+    }
+
+  if lower.startswith('vertex_ai_gemini'):
+    gemini_models = {
+        'vertex_ai_gemini-pro': 'gemini-1.0-pro',
+        'vertex_ai_gemini-2-flash': 'gemini-2.0-flash-001',
+        'vertex_ai_gemini-2-5-flash': 'gemini-2.5-flash',
+        'vertex_ai_gemini-2-5-pro': 'gemini-2.5-pro',
+        'vertex_ai_gemini-3-flash': 'gemini-3-flash-preview',
+        'vertex_ai_gemini-3-pro': 'gemini-3-pro-preview',
+        'vertex_ai_gemini-3-1-pro': 'gemini-3.1-pro-preview',
+    }
+    model = gemini_models.get(lower)
+    if model is None:
+      model = lower.removeprefix('vertex_ai_').replace('-chat', '')
+    return {
+        'model': f'vertex_ai/{model}',
+        'api_base': '',
+        'api_key': '',
+        'auth': 'adc',
+    }
+
+  if lower.startswith('gemini_api_key'):
+    model = first('FIX_BUILD_AGENT_GEMINI_MODEL', 'GEMINI_MODEL',
+                  default='gemini-2.5-flash')
+    return {
+        'model': f'gemini/{model}',
+        'api_base': '',
+        'api_key': first('GEMINI_API_KEY', 'GOOGLE_API_KEY'),
+        'auth': 'api_key',
+    }
+
+  # The original OpenAI model names are provider-neutral in oss-fuzz-gen.
+  # Explicitly qualify them for LiteLLM so the child process uses OpenAI.
+  model = requested or 'gpt-3.5-turbo'
+  if model.startswith('chatgpt-'):
+    model = model.removeprefix('chatgpt-')
+  return {
+        'model': f'openai/{model}',
+        'api_base': first('OPENAI_BASE_URL'),
+      'api_key': first('OPENAI_API_KEY'),
+      'auth': 'api_key',
+  }
+
+
 class BuildFixAgent(BaseAgent):
   """Agent for fixing OSS-Fuzz project builds."""
 
@@ -936,23 +1047,14 @@ class ExternalBuildFixAgent(BaseAgent):
     return None
 
   def _external_env(self) -> dict[str, str]:
-    """Builds an environment for the full external fix-build-agent."""
+    """Builds an environment for the bundled full fix-build agent."""
     env = os.environ.copy()
-    model_name = (os.getenv('FIX_BUILD_AGENT_MODEL')
-                  or os.getenv('OPENAI_COMPATIBLE_MODEL')
-                  or os.getenv('DEEPSEEK_MODEL') or 'deepseek-chat')
-    if model_name.startswith('deepseek') and not model_name.startswith(
-        'deepseek/'):
-      model_name = f'deepseek/{model_name}'
-    env.setdefault(
-        'API_KEY',
-        os.getenv('OPENAI_COMPATIBLE_API_KEY') or os.getenv('DEEPSEEK_API_KEY')
-        or os.getenv('API_KEY', ''))
-    env.setdefault('FIX_BUILD_AGENT_MODEL', model_name)
-    if env.get('OPENAI_COMPATIBLE_BASE_URL') or env.get('DEEPSEEK_BASE_URL'):
-      env.setdefault(
-          'FIX_BUILD_AGENT_API_BASE',
-          env.get('OPENAI_COMPATIBLE_BASE_URL') or env.get('DEEPSEEK_BASE_URL'))
+    config = _fix_build_agent_model_config(self.args.model, env)
+    env['FIX_BUILD_AGENT_MODEL'] = config['model']
+    env['API_KEY'] = config['api_key']
+    env['FIX_BUILD_AGENT_API_BASE'] = config['api_base']
+    if config.get('api_version'):
+      env['AZURE_API_VERSION'] = config['api_version']
     env.setdefault('FIX_BUILD_AGENT_SKIP_GH_AUTH_CHECK', '1')
     return env
 
@@ -981,10 +1083,13 @@ class ExternalBuildFixAgent(BaseAgent):
 
     try:
       external_env = self._external_env()
-      process = subprocess.run([self._external_python(external_path), 'agent.py',
-                                '--projects-yaml', external_yaml,
-                                '--model', external_env['FIX_BUILD_AGENT_MODEL'],
-                                '--skip-gh-auth-check'],
+      command = [
+          self._external_python(external_path), 'agent.py', '--projects-yaml',
+          external_yaml, '--model', external_env['FIX_BUILD_AGENT_MODEL'],
+          '--api-base', external_env['FIX_BUILD_AGENT_API_BASE'],
+          '--skip-gh-auth-check'
+      ]
+      process = subprocess.run(command,
                                cwd=external_path,
                                env=external_env,
                                stdout=subprocess.PIPE,

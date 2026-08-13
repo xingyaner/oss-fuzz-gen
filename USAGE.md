@@ -224,6 +224,21 @@ export DEEPSEEK_BASE_URL=https://api.deepseek.com
 export DEEPSEEK_MODEL=deepseek-chat
 ```
 
+The full repair agent also maps the original oss-fuzz-gen providers. Use
+`OPENAI_API_KEY` for OpenAI, `AZURE_OPENAI_API_KEY`,
+`AZURE_OPENAI_ENDPOINT`, and `AZURE_OPENAI_DEPLOYMENT_NAME` for Azure OpenAI,
+and Application Default Credentials for Vertex AI Gemini or Claude on Vertex:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+export GOOGLE_CLOUD_PROJECT=<project-id>
+export VERTEX_AI_LOCATIONS=us-central1
+```
+
+These provider paths are covered by offline configuration tests. Live calls
+still require the corresponding provider project, permissions, quotas, and
+credentials.
+
 ### Benchmarks
 
 In order to leverage LLMs for harness generation a set of code targets are needed.
