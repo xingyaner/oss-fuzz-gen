@@ -166,7 +166,7 @@ DeepSeek/OpenAI-compatible runs, `OPENAI_COMPATIBLE_API_KEY`,
 bundled agent as `API_KEY`, `FIX_BUILD_AGENT_API_BASE`, and
 `FIX_BUILD_AGENT_MODEL`. Agent logs, trace ledgers, archives, and final
 reports are copied into
-`results-fix-build/<model-family>/<project>/external-agent/`.
+`results-fix-build/<model-family>/<project>/`.
 
 To test a separate checkout during development, pass
 `--external-fix-build-agent-path=/path/to/fix_build_agent` together with

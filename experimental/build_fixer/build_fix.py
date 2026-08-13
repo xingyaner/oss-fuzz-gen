@@ -839,9 +839,14 @@ class ExternalBuildFixAgent(BaseAgent):
     return external_yaml
 
   def _external_archive_dir(self) -> str:
-    """Returns the oss-fuzz-gen directory for external-agent artifacts."""
+    """Returns the project directory for full-agent artifacts.
+
+    The full agent is invoked as a subprocess, but its artifacts are regular
+    fix-build results. Keeping them directly under the project directory avoids
+    an extra directory level that does not distinguish result types.
+    """
     project_output_dir = os.path.dirname(str(self.args.work_dirs.base))
-    archive_dir = os.path.join(project_output_dir, 'external-agent')
+    archive_dir = project_output_dir
     os.makedirs(archive_dir, exist_ok=True)
     return archive_dir
 
@@ -907,6 +912,12 @@ class ExternalBuildFixAgent(BaseAgent):
   def _read_external_result_success(self) -> Optional[bool]:
     """Reads the original fix_build_agent final report from copied artifacts."""
     result_path = os.path.join(self._external_archive_dir(), 'result.txt')
+    if not os.path.exists(result_path):
+      # Read results produced by older runs before the extra directory level
+      # was removed.
+      result_path = os.path.join(
+          os.path.dirname(self._external_archive_dir()), 'external-agent',
+          'result.txt')
     if not os.path.exists(result_path):
       return None
 
