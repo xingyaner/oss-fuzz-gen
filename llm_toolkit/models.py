@@ -32,6 +32,8 @@ import anthropic
 import openai
 import tiktoken
 import vertexai
+from dotenv import load_dotenv
+from google import genai
 from google.api_core.exceptions import (GoogleAPICallError, InternalServerError,
                                         InvalidArgument, ResourceExhausted,
                                         ServiceUnavailable, TooManyRequests)
@@ -44,6 +46,11 @@ from llm_toolkit import prompts
 from utils import retryable
 
 logger = logging.getLogger(__name__)
+
+load_dotenv(
+    os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
+                 '.env'),
+    override=False)
 
 # Model hyper-parameters.
 MAX_TOKENS: int = 2000
@@ -442,6 +449,91 @@ class GPT4Turbo(GPT):
   """OpenAI's GPT-4 Turbo model."""
 
   name = 'gpt-4-turbo'
+
+
+class OpenAICompatible(GPT):
+  """OpenAI-compatible API model, such as DeepSeek or compatible gateways."""
+
+  name = 'openai_compatible'
+  context_window = 128000
+  MAX_INPUT_TOKEN = 128000
+
+  def __init__(
+      self,
+      ai_binary: str,
+      max_tokens: int = MAX_TOKENS,
+      num_samples: int = NUM_SAMPLES,
+      temperature: float = TEMPERATURE,
+      temperature_list: Optional[list[float]] = None,
+  ):
+    super().__init__(ai_binary, max_tokens, num_samples, temperature,
+                     temperature_list)
+    self.api_model = os.getenv('OPENAI_COMPATIBLE_MODEL',
+                               os.getenv('DEEPSEEK_MODEL', 'deepseek-chat'))
+
+  def _get_client(self):
+    """Returns an OpenAI-compatible client."""
+    api_key = (os.getenv('OPENAI_COMPATIBLE_API_KEY') or
+               os.getenv('DEEPSEEK_API_KEY') or os.getenv('API_KEY'))
+    base_url = (os.getenv('OPENAI_COMPATIBLE_BASE_URL') or
+                os.getenv('DEEPSEEK_BASE_URL') or 'https://api.deepseek.com')
+    if not api_key:
+      raise ValueError(
+          'Set OPENAI_COMPATIBLE_API_KEY, DEEPSEEK_API_KEY, or API_KEY for '
+          'openai_compatible.')
+    return openai.OpenAI(api_key=api_key, base_url=base_url)
+
+  def chat_llm(self, client: Any, prompt: prompts.Prompt) -> str:
+    """Queries an OpenAI-compatible chat completion endpoint."""
+    if self.ai_binary:
+      raise ValueError(
+          f'OpenAI-compatible model does not use local AI binary: {self.ai_binary}'
+      )
+    if self.temperature_list:
+      logger.info('OpenAI-compatible API does not allow temperature list: %s',
+                  self.temperature_list)
+
+    self.messages.extend(prompt.get())
+    completion = self.with_retry_on_error(
+        lambda: client.chat.completions.create(messages=self.messages,
+                                               model=self.api_model,
+                                               n=self.num_samples,
+                                               temperature=self.temperature),
+        [openai.OpenAIError])
+    llm_response = completion.choices[0].message.content
+    self.messages.append({'role': 'assistant', 'content': llm_response})
+    return llm_response
+
+  def ask_llm(self, prompt: prompts.Prompt) -> str:
+    """Queries an OpenAI-compatible API with one prompt."""
+    client = self._get_client()
+    completion = self.with_retry_on_error(
+        lambda: client.chat.completions.create(messages=prompt.get(),
+                                               model=self.api_model,
+                                               n=self.num_samples,
+                                               temperature=self.temperature),
+        [openai.OpenAIError])
+    return completion.choices[0].message.content
+
+  def query_llm(self, prompt: prompts.Prompt, response_dir: str) -> None:
+    """Queries an OpenAI-compatible API and stores responses."""
+    client = self._get_client()
+    completion = self.with_retry_on_error(
+        lambda: client.chat.completions.create(messages=prompt.get(),
+                                               model=self.api_model,
+                                               n=self.num_samples,
+                                               temperature=self.temperature),
+        [openai.OpenAIError])
+    for index, choice in enumerate(completion.choices):
+      self._save_output(index, choice.message.content, response_dir)
+
+  def chat_llm_with_tools(self, client: Any, prompt: Optional[prompts.Prompt],
+                          tools) -> Any:
+    """OpenAI-compatible APIs do not consistently implement Responses tools."""
+    del client, prompt, tools
+    raise NotImplementedError(
+        'openai_compatible supports chat completions. Use raw agent loops for '
+        'tool-like workflows.')
 
 
 class ChatGPT(GPT):
@@ -1090,6 +1182,95 @@ class GeminiV3D1ProChat(GeminiV1D5Chat):
   context_window = 1048576
   name = 'vertex_ai_gemini-3-1-pro-chat'
   _vertex_ai_model = 'gemini-3.1-pro-preview'
+
+
+class GeminiAPIKeyModel(GoogleModel):
+  """Gemini Developer API model using a Google AI Studio API key."""
+
+  name = 'gemini_api_key'
+  _api_model = 'gemini-2.5-flash'
+  _max_output_tokens = 8192
+  context_window = 1048576
+  MAX_INPUT_TOKEN = 128000
+
+  def __init__(
+      self,
+      ai_binary: str,
+      max_tokens: int = MAX_TOKENS,
+      num_samples: int = NUM_SAMPLES,
+      temperature: float = TEMPERATURE,
+      temperature_list: Optional[list[float]] = None,
+  ):
+    super().__init__(ai_binary, max_tokens, num_samples, temperature,
+                     temperature_list)
+    self.api_model = os.getenv('GEMINI_MODEL', self._api_model)
+
+  def _get_client(self):
+    api_key = os.getenv('GEMINI_API_KEY') or os.getenv('GOOGLE_API_KEY')
+    if not api_key:
+      raise ValueError(
+          'Set GEMINI_API_KEY or GOOGLE_API_KEY for gemini_api_key.')
+    return genai.Client(api_key=api_key)
+
+  def get_model(self) -> str:
+    return self.api_model
+
+  def get_chat_client(self, model: Any) -> Any:
+    del model
+    return self._get_client()
+
+  def _generate_text(self, client: Any, prompt_text: str) -> str:
+    response = client.models.generate_content(
+        model=self.get_model(),
+        contents=prompt_text,
+        config={
+            'temperature': self.temperature,
+            'max_output_tokens': self._max_output_tokens,
+        })
+    return response.text or ''
+
+  def query_llm(self, prompt: prompts.Prompt, response_dir: str) -> None:
+    if self.ai_binary:
+      logger.info('Gemini API key model does not use local AI binary: %s',
+                  self.ai_binary)
+    client = self._get_client()
+    for index in range(self.num_samples):
+      response = self._generate_text(client, prompt.get())
+      self._save_output(index, response, response_dir)
+
+  def ask_llm(self, prompt: prompts.Prompt) -> str:
+    return self._generate_text(self._get_client(), prompt.get())
+
+  def chat_llm(self, client: Any, prompt: prompts.Prompt) -> str:
+    return self._generate_text(client or self._get_client(), prompt.get())
+
+  def chat_llm_with_tools(self, client: Any, prompt: Optional[prompts.Prompt],
+                          tools) -> Any:
+    del client, prompt, tools
+    raise NotImplementedError(
+        'gemini_api_key supports text generation. Use raw agent loops for '
+        'tool-like workflows.')
+
+
+class GeminiAPIKeyFlash(GeminiAPIKeyModel):
+  """Gemini 2.5 Flash using a Google AI Studio API key."""
+
+  name = 'gemini_api_key_2_5_flash'
+  _api_model = 'gemini-2.5-flash'
+
+
+class GeminiAPIKeyPro(GeminiAPIKeyModel):
+  """Gemini 2.5 Pro using a Google AI Studio API key."""
+
+  name = 'gemini_api_key_2_5_pro'
+  _api_model = 'gemini-2.5-pro'
+
+
+class GeminiAPIKeyFlashLite(GeminiAPIKeyModel):
+  """Gemini 2.5 Flash Lite using a Google AI Studio API key."""
+
+  name = 'gemini_api_key_2_5_flash_lite'
+  _api_model = 'gemini-2.5-flash-lite'
 
 
 class AIBinaryModel(GoogleModel):

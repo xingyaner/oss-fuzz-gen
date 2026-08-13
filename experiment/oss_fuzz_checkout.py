@@ -394,9 +394,8 @@ def _build_image(project_name: str) -> str:
   adjusted_env = os.environ | {
       'FUZZING_LANGUAGE': get_project_language(project_name)
   }
-  command = [
-      'python3', 'infra/helper.py', 'build_image', '--pull', project_name
-  ]
+  pull_arg = '--no-pull' if os.getenv('OFG_SKIP_BASE_IMAGE_PULL') else '--pull'
+  command = ['python3', 'infra/helper.py', 'build_image', pull_arg, project_name]
   try:
     sp.run(command,
            cwd=OSS_FUZZ_DIR,
