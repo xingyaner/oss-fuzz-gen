@@ -1,3 +1,16 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Offline tests for full fix-build-agent provider configuration."""
 
 import unittest
@@ -44,8 +57,7 @@ class FixBuildAgentModelConfigTest(unittest.TestCase):
 
   def test_claude_vertex_uses_adc_without_api_key(self):
     config = _fix_build_agent_model_config('vertex_ai_claude-3-5-sonnet', {})
-    self.assertEqual(config['model'],
-                     'vertex_ai/claude-3-5-sonnet@20240620')
+    self.assertEqual(config['model'], 'vertex_ai/claude-3-5-sonnet@20240620')
     self.assertEqual(config['auth'], 'adc')
 
   def test_gemini_api_key_is_distinct_from_vertex(self):

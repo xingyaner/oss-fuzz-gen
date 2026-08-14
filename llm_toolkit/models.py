@@ -47,10 +47,9 @@ from utils import retryable
 
 logger = logging.getLogger(__name__)
 
-load_dotenv(
-    os.path.join(os.path.dirname(os.path.dirname(os.path.realpath(__file__))),
-                 '.env'),
-    override=False)
+load_dotenv(os.path.join(
+    os.path.dirname(os.path.dirname(os.path.realpath(__file__))), '.env'),
+            override=False)
 
 # Model hyper-parameters.
 MAX_TOKENS: int = 2000
@@ -830,9 +829,8 @@ class VertexAIModel(GoogleModel):
     project = (os.getenv('GOOGLE_CLOUD_PROJECT') or
                os.getenv('GOOGLE_CLOUD_QUOTA_PROJECT'))
     if not project:
-      raise ValueError(
-          'Vertex AI requires GOOGLE_CLOUD_PROJECT or '
-          'GOOGLE_CLOUD_QUOTA_PROJECT.')
+      raise ValueError('Vertex AI requires GOOGLE_CLOUD_PROJECT or '
+                       'GOOGLE_CLOUD_QUOTA_PROJECT.')
 
     logging.info('Using project %s and location %s for Vertex AI', project,
                  location)

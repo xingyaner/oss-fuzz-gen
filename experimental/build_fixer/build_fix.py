@@ -14,8 +14,8 @@
 # limitations under the License.
 """Build fixer tooling."""
 
-import json
 import glob
+import json
 import os
 import re
 import shlex
@@ -106,9 +106,9 @@ FIXER_TOOLS = [{
 DISCOVERY_COMMAND_TIMEOUT_SECONDS = 120
 
 
-def _fix_build_agent_model_config(model_name: str,
-                                  environ: Optional[dict[str, str]] = None
-                                  ) -> dict[str, str]:
+def _fix_build_agent_model_config(
+    model_name: str,
+    environ: Optional[dict[str, str]] = None) -> dict[str, str]:
   """Maps an oss-fuzz-gen model name to the bundled agent's LiteLLM config.
 
   This function only translates configuration. It does not contact a model
@@ -127,22 +127,28 @@ def _fix_build_agent_model_config(model_name: str,
     return default
 
   if lower in ('openai_compatible', 'deepseek') or 'deepseek' in lower:
-    model = first('FIX_BUILD_AGENT_MODEL', 'OPENAI_COMPATIBLE_MODEL',
-                  'DEEPSEEK_MODEL', default='deepseek-chat')
+    model = first('FIX_BUILD_AGENT_MODEL',
+                  'OPENAI_COMPATIBLE_MODEL',
+                  'DEEPSEEK_MODEL',
+                  default='deepseek-chat')
     if not model.startswith('deepseek/'):
       model = f'deepseek/{model}'
     return {
-        'model': model,
-        'api_base': first('FIX_BUILD_AGENT_API_BASE',
-                          'OPENAI_COMPATIBLE_BASE_URL', 'DEEPSEEK_BASE_URL',
-                          default='https://api.deepseek.com'),
-        'api_key': first('API_KEY', 'OPENAI_COMPATIBLE_API_KEY',
-                         'DEEPSEEK_API_KEY'),
-        'auth': 'api_key',
+        'model':
+            model,
+        'api_base':
+            first('FIX_BUILD_AGENT_API_BASE',
+                  'OPENAI_COMPATIBLE_BASE_URL',
+                  'DEEPSEEK_BASE_URL',
+                  default='https://api.deepseek.com'),
+        'api_key':
+            first('API_KEY', 'OPENAI_COMPATIBLE_API_KEY', 'DEEPSEEK_API_KEY'),
+        'auth':
+            'api_key',
     }
 
-  if lower in ('gpt-3.5-turbo-azure', 'gpt-4-azure', 'gpt-4o-azure') or (
-      'azure' in lower):
+  if lower in ('gpt-3.5-turbo-azure', 'gpt-4-azure',
+               'gpt-4o-azure') or ('azure' in lower):
     deployment = first('FIX_BUILD_AGENT_AZURE_DEPLOYMENT',
                        'AZURE_OPENAI_DEPLOYMENT_NAME',
                        'AZURE_OPENAI_DEPLOYMENT')
@@ -195,7 +201,8 @@ def _fix_build_agent_model_config(model_name: str,
     }
 
   if lower.startswith('gemini_api_key'):
-    model = first('FIX_BUILD_AGENT_GEMINI_MODEL', 'GEMINI_MODEL',
+    model = first('FIX_BUILD_AGENT_GEMINI_MODEL',
+                  'GEMINI_MODEL',
                   default='gemini-2.5-flash')
     return {
         'model': f'gemini/{model}',
@@ -210,8 +217,8 @@ def _fix_build_agent_model_config(model_name: str,
   if model.startswith('chatgpt-'):
     model = model.removeprefix('chatgpt-')
   return {
-        'model': f'openai/{model}',
-        'api_base': first('OPENAI_BASE_URL'),
+      'model': f'openai/{model}',
+      'api_base': first('OPENAI_BASE_URL'),
       'api_key': first('OPENAI_API_KEY'),
       'auth': 'api_key',
   }
@@ -284,8 +291,8 @@ class BuildFixAgent(BaseAgent):
       template_prompt = templates.BUILD_FIX_PROBLEM
     template_prompt = template_prompt.replace('{DOCKERFILE}', dockerfile)
     template_prompt = template_prompt.replace('{BUILD_SCRIPT}', build_script)
-    template_prompt = template_prompt.replace(
-        '{LOGS}', self.initial_error_result[-4000:])
+    template_prompt = template_prompt.replace('{LOGS}',
+                                              self.initial_error_result[-4000:])
     template_prompt = template_prompt.replace('{MAX_DISCOVERY_ROUND}',
                                               str(self.args.max_round))
 
@@ -649,9 +656,8 @@ class BuildFixAgent(BaseAgent):
 
   def _with_discovery_timeout(self, command: str) -> str:
     """Wraps an exploratory command so it cannot stall the agent loop."""
-    return (
-        f'timeout {DISCOVERY_COMMAND_TIMEOUT_SECONDS}s bash -lc '
-        f'{shlex.quote(command)}')
+    return (f'timeout {DISCOVERY_COMMAND_TIMEOUT_SECONDS}s bash -lc '
+            f'{shlex.quote(command)}')
 
   def _parse_tags(self, response: str, tag: str) -> list[str]:
     """Parses the tags from LLM response."""
@@ -1012,9 +1018,9 @@ class ExternalBuildFixAgent(BaseAgent):
           shutil.copy2(source, os.path.join(fixed_files_dir, filename))
       for patch_path in glob.glob(os.path.join(latest_fixed, 'diffs',
                                                '*.patch')):
-        shutil.copy2(patch_path,
-                     os.path.join(fixed_files_dir,
-                                  os.path.basename(patch_path)))
+        shutil.copy2(
+            patch_path,
+            os.path.join(fixed_files_dir, os.path.basename(patch_path)))
     else:
       trace_path = os.path.join(external_path, 'project_repair_trace.json')
       if os.path.exists(trace_path):
@@ -1026,9 +1032,8 @@ class ExternalBuildFixAgent(BaseAgent):
     if not os.path.exists(result_path):
       # Read results produced by older runs before the extra directory level
       # was removed.
-      result_path = os.path.join(
-          os.path.dirname(self._external_archive_dir()), 'external-agent',
-          'result.txt')
+      result_path = os.path.join(os.path.dirname(self._external_archive_dir()),
+                                 'external-agent', 'result.txt')
     if not os.path.exists(result_path):
       return None
 

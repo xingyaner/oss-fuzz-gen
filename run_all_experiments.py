@@ -121,15 +121,12 @@ def prepare_experiment_targets(
 
 def _model_result_family(model_name: str) -> str:
   """Returns the result directory family for a model."""
-  model_hint = ' '.join([
-      model_name or '',
-      os.getenv('OPENAI_COMPATIBLE_MODEL', ''),
-      os.getenv('DEEPSEEK_MODEL', ''),
-      os.getenv('FIX_BUILD_AGENT_MODEL', ''),
-  ]).lower()
-  if 'deepseek' in model_hint or model_name == 'openai_compatible':
+  # Use the requested provider, rather than ambient credentials, to keep
+  # results from separate model runs in the correct directory.
+  normalized_name = (model_name or '').lower()
+  if 'deepseek' in normalized_name or normalized_name == 'openai_compatible':
     return 'deepseek'
-  if 'gemini' in model_hint:
+  if 'gemini' in normalized_name:
     return 'gemini'
   return re.sub(r'[^A-Za-z0-9_.-]+', '-', model_name or 'default').strip('-')
 
@@ -595,9 +592,9 @@ def main():
   global WORK_DIR
 
   args = parse_args()
-  user_supplied_work_dir = any(arg in ('-w', '--work-dir') or
-                               arg.startswith('--work-dir=')
-                               for arg in sys.argv[1:])
+  user_supplied_work_dir = any(
+      arg in ('-w', '--work-dir') or arg.startswith('--work-dir=')
+      for arg in sys.argv[1:])
   if args.fix_build_agent and not user_supplied_work_dir:
     args.work_dir = os.path.join('results-fix-build',
                                  _model_result_family(args.model))

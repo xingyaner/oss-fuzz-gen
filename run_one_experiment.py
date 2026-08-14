@@ -25,6 +25,7 @@ from typing import List, Optional
 import logger
 import pipeline
 import pipeline_fix_build
+from agent.base_agent import BaseAgent
 from agent.context_analyzer import ContextAnalyzer
 from agent.coverage_analyzer import CoverageAnalyzer
 from agent.crash_analyzer import CrashAnalyzer
@@ -252,6 +253,7 @@ def _fuzzing_pipeline(benchmark: Benchmark, model: models.LLM,
 
   # Support custom pipeline.
   if args.fix_build_agent:
+    writer_agents: list[BaseAgent]
     if args.external_fix_build_agent_path:
       writer_agents = [
           ExternalBuildFixAgent(trial=trial,

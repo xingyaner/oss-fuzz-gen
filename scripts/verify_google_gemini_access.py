@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Verify Google Gemini access with an API key or Vertex AI ADC.
 
 Usage examples:
@@ -34,7 +47,9 @@ def _test_gemini_api_key(api_key: str, model: str) -> bool:
   """Tests Gemini Developer API / Google AI Studio API-key access."""
   print("[1/2] Testing Gemini API key access...")
   if not api_key:
-    print("SKIP: No API key provided via --api-key, GEMINI_API_KEY, or GOOGLE_API_KEY.")
+    print(
+        "SKIP: No API key provided via --api-key, GEMINI_API_KEY, or GOOGLE_API_KEY."
+    )
     return False
 
   try:
@@ -44,7 +59,8 @@ def _test_gemini_api_key(api_key: str, model: str) -> bool:
         contents="Reply with exactly: ok",
     )
     text = (response.text or "").strip()
-    print(f"PASS: Gemini API key works with model '{model}'. Response: {text!r}")
+    print(
+        f"PASS: Gemini API key works with model '{model}'. Response: {text!r}")
     return True
   except Exception as exc:  # pylint: disable=broad-exception-caught
     print(f"FAIL: Gemini API key test failed:\n{_short_error(exc)}")
@@ -55,7 +71,9 @@ def _test_vertex_ai(project: Optional[str], location: str, model: str) -> bool:
   """Tests Vertex AI Gemini access using Application Default Credentials."""
   print("[2/2] Testing Vertex AI Gemini access with ADC...")
   if not project:
-    print("SKIP: No --vertex-project provided. Vertex AI does not use an API key here.")
+    print(
+        "SKIP: No --vertex-project provided. Vertex AI does not use an API key here."
+    )
     return False
 
   try:
@@ -65,9 +83,8 @@ def _test_vertex_ai(project: Optional[str], location: str, model: str) -> bool:
         contents="Reply with exactly: ok",
     )
     text = (response.text or "").strip()
-    print(
-        f"PASS: Vertex AI Gemini works with project '{project}', "
-        f"location '{location}', model '{model}'. Response: {text!r}")
+    print(f"PASS: Vertex AI Gemini works with project '{project}', "
+          f"location '{location}', model '{model}'. Response: {text!r}")
     return True
   except Exception as exc:  # pylint: disable=broad-exception-caught
     print(f"FAIL: Vertex AI Gemini test failed:\n{_short_error(exc)}")
@@ -80,7 +97,8 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
       "--api-key",
       default=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "",
-      help="Gemini API / Google AI Studio API key. Defaults to GEMINI_API_KEY or GOOGLE_API_KEY.",
+      help=
+      "Gemini API / Google AI Studio API key. Defaults to GEMINI_API_KEY or GOOGLE_API_KEY.",
   )
   parser.add_argument(
       "--model",
@@ -90,7 +108,8 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
       "--vertex-project",
       default=os.getenv("GOOGLE_CLOUD_PROJECT", ""),
-      help="GCP project ID for Vertex AI ADC test. Defaults to GOOGLE_CLOUD_PROJECT.",
+      help=
+      "GCP project ID for Vertex AI ADC test. Defaults to GOOGLE_CLOUD_PROJECT.",
   )
   parser.add_argument(
       "--vertex-location",
@@ -115,8 +134,12 @@ def main() -> int:
                                 args.model)
 
   print("\nSummary:")
-  print(f"- Gemini API / AI Studio key: {'OK' if api_key_ok else 'NOT OK or not tested'}")
-  print(f"- Vertex AI Gemini / ADC: {'OK' if vertex_ok else 'NOT OK or not tested'}")
+  print(
+      f"- Gemini API / AI Studio key: {'OK' if api_key_ok else 'NOT OK or not tested'}"
+  )
+  print(
+      f"- Vertex AI Gemini / ADC: {'OK' if vertex_ok else 'NOT OK or not tested'}"
+  )
 
   if api_key_ok or vertex_ok:
     return 0
