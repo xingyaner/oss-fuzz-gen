@@ -38,6 +38,28 @@ MAX_ROUND = 100
 DATA_DIR = '/experiment/data-dir/'
 
 
+def _is_fix_build_request(args: argparse.Namespace) -> bool:
+  """Returns whether downstream arguments request build repair."""
+  return args.agent or '--fix-build-agent' in args.additional_args
+
+
+def _model_result_family(model: str) -> str:
+  """Returns the result directory family used by run_all_experiments."""
+  normalized = (model or '').lower()
+  if 'deepseek' in normalized or normalized == 'openai_compatible':
+    return 'deepseek'
+  if 'gemini' in normalized:
+    return 'gemini'
+  return model or 'default'
+
+
+def _local_results_dir(args: argparse.Namespace) -> str:
+  """Returns the directory that contains the current experiment results."""
+  if _is_fix_build_request(args):
+    return os.path.join('results-fix-build', _model_result_family(args.model))
+  return 'results'
+
+
 def _parse_args(cmd) -> argparse.Namespace:
   """Parses the command line arguments."""
   parser = argparse.ArgumentParser(description='Run experiments')
@@ -127,7 +149,9 @@ def _parse_args(cmd) -> argparse.Namespace:
   args, additional_args = parser.parse_known_args(cmd)
 
   # Arguments after the first element ("--") separator.
-  args.additional_args = additional_args[1:]
+  args.additional_args = additional_args
+  if args.additional_args and args.additional_args[0] == '--':
+    args.additional_args = args.additional_args[1:]
 
   # Parse boolean arguments
   args.local_introspector = args.local_introspector.lower() == "true"
@@ -236,7 +260,7 @@ def run_on_data_from_scratch(cmd=None):
   # Trends report use a similarly named path.
   gcs_trend_report_path = f"{args.sub_dir}/{experiment_name}.json"
 
-  local_results_dir = 'results'
+  local_results_dir = _local_results_dir(args)
 
   # split additional args that are exclusive to upload_report.sh,
   # pass the rest to run_all_experiment.py
@@ -391,7 +415,7 @@ def run_standard(cmd=None):
   vary_temperature = [0.5, 0.6, 0.7, 0.8, 0.9] if args.vary_temperature else []
 
   date = datetime.datetime.now().strftime('%Y-%m-%d')
-  local_results_dir = 'results'
+  local_results_dir = _local_results_dir(args)
 
   # Experiment name is used to label the Cloud Builds and as part of the
   # GCS directory that build logs are stored in.

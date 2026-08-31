@@ -61,9 +61,17 @@ update_report() {
   # Generate the report
   if [[ $GCS_DIR != '' ]]; then
     CLOUD_BASE_URL="https://llm-exp.oss-fuzz.com/Result-reports/${GCS_DIR}"
-    $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report --base-url "$CLOUD_BASE_URL" --gcs-dir "${GCS_DIR}" $REPORT_ADDITIONAL_ARGS
+    if [[ $RESULTS_DIR == *results-fix-build* ]]; then
+      $PYTHON -m report.fix_build -r "${RESULTS_DIR:?}" -o results-report -m "$MODEL"
+    else
+      $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report --base-url "$CLOUD_BASE_URL" --gcs-dir "${GCS_DIR}" $REPORT_ADDITIONAL_ARGS
+    fi
   else
-    $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report $REPORT_ADDITIONAL_ARGS
+    if [[ $RESULTS_DIR == *results-fix-build* ]]; then
+      $PYTHON -m report.fix_build -r "${RESULTS_DIR:?}" -o results-report -m "$MODEL"
+    else
+      $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report $REPORT_ADDITIONAL_ARGS
+    fi
   fi
 
   cd results-report || exit 1
