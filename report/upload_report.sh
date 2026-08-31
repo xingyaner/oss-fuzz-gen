@@ -57,6 +57,11 @@ if [[ $RESULTS_DIR == *results-fix-build* ]]; then
   IS_FIX_BUILD=true
 fi
 
+REPORT_RESULTS_DIR="${RESULTS_DIR}"
+if [[ "$IS_FIX_BUILD" == true ]]; then
+  REPORT_RESULTS_DIR="results-fix-build-standard/${MODEL}"
+fi
+
 # Keep the original delay for normal experiments. Fix-build reports are
 # generated from a different result layout and can be published immediately.
 if [[ "$IS_FIX_BUILD" == true ]]; then
@@ -82,18 +87,25 @@ update_report() {
   rm -rf results-report
   mkdir -p results-report
 
+  if [[ "$IS_FIX_BUILD" == true ]]; then
+    rm -rf "${REPORT_RESULTS_DIR}"
+    mkdir -p "${REPORT_RESULTS_DIR}"
+    echo "Adapting fix-build results for the native report: ${REPORT_RESULTS_DIR}"
+    $PYTHON -m report.fix_build_adapter -r "${RESULTS_DIR:?}" -o "${REPORT_RESULTS_DIR:?}" || return 1
+  fi
+
   # Generate the report
   echo "Generating report."
   if [[ $GCS_DIR != '' ]]; then
     CLOUD_BASE_URL="https://llm-exp.oss-fuzz.com/Result-reports/${GCS_DIR}"
     if [[ "$IS_FIX_BUILD" == true ]]; then
-      $PYTHON -m report.fix_build -r "${RESULTS_DIR:?}" -o results-report -m "$MODEL"
+      $PYTHON -m report.web -r "${REPORT_RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report --base-url "$CLOUD_BASE_URL" --gcs-dir "${GCS_DIR}" $REPORT_ADDITIONAL_ARGS
     else
       $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report --base-url "$CLOUD_BASE_URL" --gcs-dir "${GCS_DIR}" $REPORT_ADDITIONAL_ARGS
     fi
   else
     if [[ "$IS_FIX_BUILD" == true ]]; then
-      $PYTHON -m report.fix_build -r "${RESULTS_DIR:?}" -o results-report -m "$MODEL"
+      $PYTHON -m report.web -r "${REPORT_RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report $REPORT_ADDITIONAL_ARGS
     else
       $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report $REPORT_ADDITIONAL_ARGS
     fi
