@@ -57,18 +57,23 @@ def _load_input(path: Path) -> dict[str, Any]:
 
 def _find_project_dirs(results_dir: Path) -> list[Path]:
   """Finds project result directories and ignores nested agent folders."""
-  candidates = []
-  for path in results_dir.iterdir() if results_dir.is_dir() else []:
-    if not path.is_dir():
-      continue
-    if (path / 'input.yaml').is_file() or (path / 'result.txt').is_file():
-      candidates.append(path)
-      continue
-    for nested in path.iterdir():
-      if nested.is_dir() and ((nested / 'input.yaml').is_file() or
-                              (nested / 'result.txt').is_file()):
-        candidates.append(nested)
-  return sorted(set(candidates))
+  if not results_dir.is_dir():
+    return []
+
+  candidates: set[Path] = set()
+  markers = {'input.yaml', 'result.txt', 'repair-trace.json'}
+  for marker in markers:
+    for artifact in results_dir.rglob(marker):
+      # Agent artifacts can be nested below the project directory. Walk up
+      # through known implementation folders before registering the project.
+      project_dir = artifact.parent
+      while project_dir.parent != results_dir and project_dir.name in {
+          'external-agent', 'fixed-files', 'process_fixed', 'process_unfixed'
+      }:
+        project_dir = project_dir.parent
+      if project_dir != results_dir:
+        candidates.add(project_dir)
+  return sorted(candidates)
 
 
 def _first_file(project_dir: Path, name: str) -> Path | None:
@@ -76,7 +81,7 @@ def _first_file(project_dir: Path, name: str) -> Path | None:
   direct = project_dir / name
   if direct.is_file():
     return direct
-  matches = sorted(project_dir.glob(f'*/{name}'))
+  matches = sorted(project_dir.rglob(name))
   return matches[0] if matches else None
 
 
