@@ -55,8 +55,6 @@ def _model_result_family(model: str) -> str:
 
 def _local_results_dir(args: argparse.Namespace) -> str:
   """Returns the directory that contains the current experiment results."""
-  if _is_fix_build_request(args):
-    return os.path.join('results-fix-build', _model_result_family(args.model))
   return 'results'
 
 
@@ -280,6 +278,8 @@ def run_on_data_from_scratch(cmd=None):
       "bash", "report/upload_report.sh", local_results_dir, gcs_report_dir,
       args.benchmark_set, args.model
   ]
+  if _is_fix_build_request(args):
+    report_cmd.append('fix-build')
 
   if report_arg.with_csv:
     report_cmd.append('--with-csv')
@@ -451,6 +451,8 @@ def run_standard(cmd=None):
       "bash", "report/upload_report.sh", local_results_dir, gcs_report_dir,
       args.benchmark_set, args.model
   ]
+  if _is_fix_build_request(args):
+    report_cmd.append('fix-build')
 
   if report_arg.with_csv:
     report_cmd.append('--with-csv')

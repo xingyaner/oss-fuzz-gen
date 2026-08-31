@@ -133,7 +133,7 @@ def _model_result_family(model_name: str) -> str:
 
 def _fix_build_project_work_dir(args, benchmark: benchmarklib.Benchmark) -> str:
   safe_project = re.sub(r'[^A-Za-z0-9_.-]+', '-', benchmark.project).strip('-')
-  return os.path.join(args.work_dir, safe_project, f'output-{benchmark.id}')
+  return os.path.join(args.work_dir, f'output-{safe_project}-build')
 
 
 def run_experiments(benchmark: benchmarklib.Benchmark, args) -> Result:
@@ -596,8 +596,7 @@ def main():
       arg in ('-w', '--work-dir') or arg.startswith('--work-dir=')
       for arg in sys.argv[1:])
   if args.fix_build_agent and not user_supplied_work_dir:
-    args.work_dir = os.path.join('results-fix-build',
-                                 _model_result_family(args.model))
+    args.work_dir = RESULTS_DIR
   _setup_logging(args.log_level, is_cloud=args.cloud_experiment_name != '')
   logger.info('Starting experiments on PR branch')
 

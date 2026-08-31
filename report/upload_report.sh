@@ -28,8 +28,13 @@ RESULTS_DIR=$1
 GCS_DIR=$2
 BENCHMARK_SET=$3
 MODEL=$4
+REPORT_MODE=$5
 # All remaining arguments are additional args for report.web
-shift 4
+if [[ $# -ge 5 ]]; then
+  shift 5
+else
+  shift 4
+fi
 REPORT_ADDITIONAL_ARGS="$@"
 DATE=$(date '+%Y-%m-%d')
 
@@ -53,13 +58,8 @@ then
 fi
 
 IS_FIX_BUILD=false
-if [[ $RESULTS_DIR == *results-fix-build* ]]; then
+if [[ "$REPORT_MODE" == 'fix-build' ]]; then
   IS_FIX_BUILD=true
-fi
-
-REPORT_RESULTS_DIR="${RESULTS_DIR}"
-if [[ "$IS_FIX_BUILD" == true ]]; then
-  REPORT_RESULTS_DIR="results-fix-build-standard/${MODEL}"
 fi
 
 # Keep the original delay for normal experiments. Fix-build reports are
@@ -88,10 +88,7 @@ update_report() {
   mkdir -p results-report
 
   if [[ "$IS_FIX_BUILD" == true ]]; then
-    rm -rf "${REPORT_RESULTS_DIR}"
-    mkdir -p "${REPORT_RESULTS_DIR}"
-    echo "Adapting fix-build results for the native report: ${REPORT_RESULTS_DIR}"
-    $PYTHON -m report.fix_build_adapter -r "${RESULTS_DIR:?}" -o "${REPORT_RESULTS_DIR:?}" || return 1
+    echo "Using native OSS-Fuzz-Gen results for fix-build report."
   fi
 
   # Generate the report
@@ -99,13 +96,13 @@ update_report() {
   if [[ $GCS_DIR != '' ]]; then
     CLOUD_BASE_URL="https://llm-exp.oss-fuzz.com/Result-reports/${GCS_DIR}"
     if [[ "$IS_FIX_BUILD" == true ]]; then
-      $PYTHON -m report.web -r "${REPORT_RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report --base-url "$CLOUD_BASE_URL" --gcs-dir "${GCS_DIR}" $REPORT_ADDITIONAL_ARGS
+      $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report --base-url "$CLOUD_BASE_URL" --gcs-dir "${GCS_DIR}" $REPORT_ADDITIONAL_ARGS
     else
       $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report --base-url "$CLOUD_BASE_URL" --gcs-dir "${GCS_DIR}" $REPORT_ADDITIONAL_ARGS
     fi
   else
     if [[ "$IS_FIX_BUILD" == true ]]; then
-      $PYTHON -m report.web -r "${REPORT_RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report $REPORT_ADDITIONAL_ARGS
+      $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report $REPORT_ADDITIONAL_ARGS
     else
       $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report $REPORT_ADDITIONAL_ARGS
     fi
