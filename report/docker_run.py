@@ -60,6 +60,14 @@ def _local_results_dir(args: argparse.Namespace) -> str:
   return 'results'
 
 
+def _log_result_configuration(args: argparse.Namespace,
+                              results_dir: str) -> None:
+  """Logs the result layout selected for the current experiment."""
+  logging.info('Fix-build request: %s.', _is_fix_build_request(args))
+  logging.info('Local results directory: %s.', results_dir)
+  logging.info('Additional experiment arguments: %s.', args.additional_args)
+
+
 def _parse_args(cmd) -> argparse.Namespace:
   """Parses the command line arguments."""
   parser = argparse.ArgumentParser(description='Run experiments')
@@ -261,6 +269,7 @@ def run_on_data_from_scratch(cmd=None):
   gcs_trend_report_path = f"{args.sub_dir}/{experiment_name}.json"
 
   local_results_dir = _local_results_dir(args)
+  _log_result_configuration(args, local_results_dir)
 
   # split additional args that are exclusive to upload_report.sh,
   # pass the rest to run_all_experiment.py
@@ -329,6 +338,8 @@ def run_on_data_from_scratch(cmd=None):
   ]
   if args.agent:
     cmd.append("--agent")
+  if args.additional_args:
+    cmd.extend(args.additional_args)
 
   # Run the experiment and redirect to file if indicated.
   if args.redirect_outs:
@@ -416,6 +427,7 @@ def run_standard(cmd=None):
 
   date = datetime.datetime.now().strftime('%Y-%m-%d')
   local_results_dir = _local_results_dir(args)
+  _log_result_configuration(args, local_results_dir)
 
   # Experiment name is used to label the Cloud Builds and as part of the
   # GCS directory that build logs are stored in.
