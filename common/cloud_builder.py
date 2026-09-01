@@ -207,7 +207,7 @@ class CloudBuilder:
     # before using it in Cloud Build steps outside that container.
     experiment_relative_path = os.path.relpath(experiment_path, '/experiment')
     experiment_host_path = os.path.join('/workspace/host/experiment',
-                                         experiment_relative_path)
+                                        experiment_relative_path)
 
     # Used for injecting additional OSS-Fuzz project integrations not in
     # upstream OSS-Fuzz.
