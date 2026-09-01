@@ -84,30 +84,34 @@ update_report() {
   report_status=$?
   if [[ $report_status -ne 0 ]]; then
     echo "Report generation failed with exit code ${report_status}."
-    return $report_status
-  fi
-  if [[ ! -f results-report/index.html ]]; then
+  elif [[ ! -f results-report/index.html ]]; then
     echo "Report generation did not create results-report/index.html."
-    return 1
+    report_status=1
+  else
+    cd results-report || return 1
+
+    # Upload the report to GCS.
+    echo "Uploading the report."
+    BUCKET_PATH="gs://oss-fuzz-gcb-experiment-run-logs/Result-reports/${GCS_DIR:?}"
+    # Upload HTMLs.
+    if ! gcloud storage cp --recursive --content-type="text/html" \
+           --cache-control="public, max-age=3600" \
+           . "$BUCKET_PATH"; then
+      echo "HTML report upload failed."
+      report_status=1
+    fi
+    # Find all JSON files and upload them, removing the leading './'
+    while read -r file; do
+      file_path="${file#./}"  # Remove the leading "./".
+      if ! gcloud storage cp --content-type="application/json" \
+          --cache-control="public, max-age=3600" "$file" "$BUCKET_PATH/$file_path"; then
+        echo "JSON report upload failed for ${file_path}."
+        report_status=1
+      fi
+    done < <(find . -name '*json')
+
+    cd .. || return 1
   fi
-
-  cd results-report || exit 1
-
-  # Upload the report to GCS.
-  echo "Uploading the report."
-  BUCKET_PATH="gs://oss-fuzz-gcb-experiment-run-logs/Result-reports/${GCS_DIR:?}"
-  # Upload HTMLs.
-  gcloud storage cp --recursive --content-type="text/html" \
-         --cache-control="public, max-age=3600" \
-         . "$BUCKET_PATH" || return 1
-  # Find all JSON files and upload them, removing the leading './'
-  find . -name '*json' | while read -r file; do
-    file_path="${file#./}"  # Remove the leading "./".
-    gcloud storage cp --content-type="application/json" \
-        --cache-control="public, max-age=3600" "$file" "$BUCKET_PATH/$file_path" || return 1
-  done
-
-  cd ..
 
   # Upload raw results after publishing the report. A partial or empty
   # results directory must not prevent the HTML report from being published.
@@ -119,6 +123,10 @@ update_report() {
     fi
   else
     echo "Raw results directory is not available yet."
+  fi
+
+  if [[ $report_status -ne 0 ]]; then
+    return "$report_status"
   fi
 
   echo "See the published report at https://llm-exp.oss-fuzz.com/Result-reports/${GCS_DIR:?}/"
