@@ -202,6 +202,13 @@ class CloudBuilder:
                            new_experiment_filename: str) -> str:
     """Requests Cloud Build to execute the operation."""
 
+    # The experiment directory is mounted into the agent container as
+    # /experiment from /workspace/host/experiment. Convert the container path
+    # before using it in Cloud Build steps outside that container.
+    experiment_relative_path = os.path.relpath(experiment_path, '/experiment')
+    experiment_host_path = os.path.join('/workspace/host/experiment',
+                                         experiment_relative_path)
+
     # Used for injecting additional OSS-Fuzz project integrations not in
     # upstream OSS-Fuzz.
     oss_fuzz_data_dir = ''
@@ -262,9 +269,9 @@ class CloudBuilder:
                 'args': [
                     '-c', f'gcloud storage cp {experiment_url}'
                     '/tmp/ofg-exp.tar.gz && '
-                    f'mkdir -p /workspace/host/{experiment_path} && '
-                    f'tar -xzf /tmp/ofg-exp.tar.gz'
-                    f'-C /workspace/host/{experiment_path}'
+                    f'mkdir -p {experiment_host_path} && '
+                    f'tar -xzf /tmp/ofg-exp.tar.gz '
+                    f'-C {experiment_host_path}'
                 ],
                 'allowFailure': True,
             },
@@ -394,15 +401,15 @@ class CloudBuilder:
             {
                 'name': 'bash',
                 'dir': '/workspace',
-                'args': ['ls', '-R', f'/workspace/host/{experiment_path}']
+                'args': ['ls', '-R', experiment_host_path]
             },
             {
                 'name': 'gcr.io/cloud-builders/gcloud',
                 'entrypoint': 'bash',
                 'args': [
-                    '-c', f'test -d /workspace/host/{experiment_path} && '
+                    '-c', f'test -d {experiment_host_path} && '
                     f'tar -czf /tmp/{new_experiment_filename} '
-                    f'-C /workspace/host/{experiment_path} . && '
+                    f'-C {experiment_host_path} . && '
                     f'gcloud storage cp /tmp/{new_experiment_filename} '
                     f'gs://{self.bucket_name}/{new_experiment_filename}'
                 ],
