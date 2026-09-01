@@ -28,13 +28,8 @@ RESULTS_DIR=$1
 GCS_DIR=$2
 BENCHMARK_SET=$3
 MODEL=$4
-REPORT_MODE=$5
 # All remaining arguments are additional args for report.web
-if [[ $# -ge 5 ]]; then
-  shift 5
-else
-  shift 4
-fi
+shift 4
 REPORT_ADDITIONAL_ARGS="$@"
 DATE=$(date '+%Y-%m-%d')
 
@@ -57,22 +52,12 @@ then
   exit 1
 fi
 
-IS_FIX_BUILD=false
-if [[ "$REPORT_MODE" == 'fix-build' ]]; then
-  IS_FIX_BUILD=true
-fi
-
-# Keep the original delay for normal experiments. Fix-build reports are
-# generated from a different result layout and can be published immediately.
-if [[ "$IS_FIX_BUILD" == true ]]; then
-  sleep 30
-else
-  sleep 300
-fi
+# Give the experiment a short head start while still publishing early
+# diagnostics. The interval can be overridden for local pipeline tests.
+sleep "${REPORT_INITIAL_DELAY:-30}"
 
 echo "Report results directory: ${RESULTS_DIR}"
 echo "Report GCS directory: ${GCS_DIR}"
-echo "Fix-build report mode: ${IS_FIX_BUILD}"
 mkdir -p results-report
 
 update_report() {
@@ -87,25 +72,23 @@ update_report() {
   rm -rf results-report
   mkdir -p results-report
 
-  if [[ "$IS_FIX_BUILD" == true ]]; then
-    echo "Using native OSS-Fuzz-Gen results for fix-build report."
+  # Upload raw results first so execution logs remain available even when
+  # report.web fails on an incomplete result set.
+  if [[ -d "${RESULTS_DIR}" ]]; then
+    echo "Uploading raw results before report generation."
+    gcloud storage cp --recursive "${RESULTS_DIR:?}" \
+        "gs://oss-fuzz-gcb-experiment-run-logs/Result-reports/${GCS_DIR:?}" || return 1
+  else
+    echo "Raw results directory is not available yet."
   fi
 
   # Generate the report
   echo "Generating report."
   if [[ $GCS_DIR != '' ]]; then
     CLOUD_BASE_URL="https://llm-exp.oss-fuzz.com/Result-reports/${GCS_DIR}"
-    if [[ "$IS_FIX_BUILD" == true ]]; then
-      $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report --base-url "$CLOUD_BASE_URL" --gcs-dir "${GCS_DIR}" $REPORT_ADDITIONAL_ARGS
-    else
-      $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report --base-url "$CLOUD_BASE_URL" --gcs-dir "${GCS_DIR}" $REPORT_ADDITIONAL_ARGS
-    fi
+    $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report --base-url "$CLOUD_BASE_URL" --gcs-dir "${GCS_DIR}" $REPORT_ADDITIONAL_ARGS
   else
-    if [[ "$IS_FIX_BUILD" == true ]]; then
-      $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report $REPORT_ADDITIONAL_ARGS
-    else
-      $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report $REPORT_ADDITIONAL_ARGS
-    fi
+    $PYTHON -m report.web -r "${RESULTS_DIR:?}" -b "${BENCHMARK_SET:?}" -m "$MODEL" -o results-report $REPORT_ADDITIONAL_ARGS
   fi
 
   report_status=$?
@@ -135,11 +118,6 @@ update_report() {
   done
 
   cd ..
-
-  # Upload the raw results into the same GCS directory.
-  echo "Uploading the raw results."
-  gcloud storage cp --recursive "${RESULTS_DIR:?}" \
-         "gs://oss-fuzz-gcb-experiment-run-logs/Result-reports/${GCS_DIR:?}" || return 1
 
   echo "See the published report at https://llm-exp.oss-fuzz.com/Result-reports/${GCS_DIR:?}/"
 

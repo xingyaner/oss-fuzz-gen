@@ -278,9 +278,6 @@ def run_on_data_from_scratch(cmd=None):
       "bash", "report/upload_report.sh", local_results_dir, gcs_report_dir,
       args.benchmark_set, args.model
   ]
-  if _is_fix_build_request(args):
-    report_cmd.append('fix-build')
-
   if report_arg.with_csv:
     report_cmd.append('--with-csv')
   if report_arg.with_google_sheets:
@@ -451,9 +448,6 @@ def run_standard(cmd=None):
       "bash", "report/upload_report.sh", local_results_dir, gcs_report_dir,
       args.benchmark_set, args.model
   ]
-  if _is_fix_build_request(args):
-    report_cmd.append('fix-build')
-
   if report_arg.with_csv:
     report_cmd.append('--with-csv')
   if report_arg.with_google_sheets:
