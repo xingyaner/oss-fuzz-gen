@@ -823,32 +823,15 @@ class VertexAIModel(GoogleModel):
   _vertex_ai_model = ''
   _max_output_tokens = 2048
 
-  def __init__(self, *args, **kwargs):
-    super().__init__(*args, **kwargs)
-    self._vertex_initialized = False
-
   def cloud_setup(self):
     """Sets Vertex AI cloud location."""
     vertex_ai_locations = os.getenv('VERTEX_AI_LOCATIONS',
                                     'us-central1').split(',')
     location = random.sample(vertex_ai_locations, 1)[0]
-    project = (os.getenv('GOOGLE_CLOUD_PROJECT') or
-               os.getenv('GOOGLE_CLOUD_QUOTA_PROJECT'))
-    if not project:
-      raise ValueError('Vertex AI requires GOOGLE_CLOUD_PROJECT or '
-                       'GOOGLE_CLOUD_QUOTA_PROJECT.')
-
-    logging.info('Using project %s and location %s for Vertex AI', project,
-                 location)
-    vertexai.init(project=project, location=location)
-    self._vertex_initialized = True
-
-  def _ensure_vertex_initialized(self):
-    if not self._vertex_initialized:
-      self.cloud_setup()
+    logging.info('Using location %s for Vertex AI', location)
+    vertexai.init(location=location,)
 
   def get_model(self) -> Any:
-    self._ensure_vertex_initialized()
     return CodeGenerationModel.from_pretrained(self._vertex_ai_model)
 
   def do_generate(self, model: Any, prompt: str, config: dict[str, Any]) -> Any:
@@ -917,7 +900,6 @@ class GeminiModel(VertexAIModel):
   ]
 
   def get_model(self) -> Any:
-    self._ensure_vertex_initialized()
     return GenerativeModel(self._vertex_ai_model)
 
   def do_generate(self, model: Any, prompt: str, config: dict[str, Any]) -> Any:
