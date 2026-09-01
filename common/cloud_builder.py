@@ -267,7 +267,7 @@ class CloudBuilder:
                 'name': 'gcr.io/cloud-builders/gcloud',
                 'entrypoint': 'bash',
                 'args': [
-                    '-c', f'gcloud storage cp {experiment_url}'
+                    '-c', f'gcloud storage cp {experiment_url} '
                     '/tmp/ofg-exp.tar.gz && '
                     f'mkdir -p {experiment_host_path} && '
                     f'tar -xzf /tmp/ofg-exp.tar.gz '
