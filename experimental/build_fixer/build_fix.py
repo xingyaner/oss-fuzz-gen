@@ -1065,8 +1065,24 @@ class ExternalBuildFixAgent(BaseAgent):
       return candidate
     return sys.executable
 
+  def _resolve_external_path(self) -> str:
+    """Resolves the agent checkout path in local and Cloud Build layouts."""
+    configured_path = os.path.realpath(self.args.external_fix_build_agent_path)
+    candidates = [
+        configured_path,
+        '/workspace/ofg/fix_build_agent',
+        '/workspace/fix_build_agent',
+        '/experiment/fix_build_agent',
+    ]
+    for candidate in candidates:
+      if os.path.isdir(candidate):
+        return candidate
+    return configured_path
+
   def execute(self, result_history: list[Result]) -> BuildResult:
-    external_path = os.path.realpath(self.args.external_fix_build_agent_path)
+    configured_path = os.path.realpath(self.args.external_fix_build_agent_path)
+    external_path = self._resolve_external_path()
+    logging.info('Configured external agent path: %s', configured_path)
     logging.info('External fix-build agent path: %s', external_path)
     logging.info('External fix-build agent path exists: %s',
                  os.path.isdir(external_path))
