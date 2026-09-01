@@ -1066,8 +1066,37 @@ class ExternalBuildFixAgent(BaseAgent):
 
   def execute(self, result_history: list[Result]) -> BuildResult:
     external_path = os.path.realpath(self.args.external_fix_build_agent_path)
+    logging.info('External fix-build agent path: %s', external_path)
+    logging.info('External fix-build agent path exists: %s',
+                 os.path.isdir(external_path))
+    logging.info('External fix-build agent cwd: %s', os.getcwd())
+    logging.info('External fix-build agent Python: %s', sys.executable)
+    for candidate in [
+        external_path,
+        '/experiment/fix_build_agent',
+        '/workspace/ofg/fix_build_agent',
+        '/workspace/fix_build_agent',
+    ]:
+      logging.info('External agent candidate: %s (exists=%s)', candidate,
+                   os.path.exists(candidate))
+    if os.path.isdir('/workspace/ofg'):
+      tree_entries = []
+      for root, dirs, files in os.walk('/workspace/ofg'):
+        depth = root.removeprefix('/workspace/ofg').count(os.sep)
+        if depth > 2:
+          dirs[:] = []
+          continue
+        for name in sorted(dirs + files):
+          tree_entries.append(os.path.join(root, name))
+          if len(tree_entries) >= 200:
+            break
+        if len(tree_entries) >= 200:
+          break
+      logging.info('Cloud agent workspace tree (up to 200 entries): %s',
+                   tree_entries)
     if not os.path.isdir(external_path):
       message = f'External fix build agent path does not exist: {external_path}'
+      logging.error(message)
       return BuildResult(self.benchmark,
                          self.trial,
                          self.args.work_dirs,
@@ -1088,6 +1117,9 @@ class ExternalBuildFixAgent(BaseAgent):
           '--api-base', external_env['FIX_BUILD_AGENT_API_BASE'],
           '--skip-gh-auth-check'
       ]
+      logging.info('External fix-build command: %s', command)
+      logging.info('External projects YAML: %s (exists=%s)', external_yaml,
+                   os.path.exists(external_yaml))
       process = subprocess.run(command,
                                cwd=external_path,
                                env=external_env,
@@ -1098,6 +1130,8 @@ class ExternalBuildFixAgent(BaseAgent):
                                errors='ignore',
                                check=False)
       log_text = process.stdout
+      logging.info('External fix-build process return code: %s',
+                   process.returncode)
       with open(log_path, 'w') as f:
         f.write(log_text)
     except Exception as exc:  # pylint: disable=broad-exception-caught

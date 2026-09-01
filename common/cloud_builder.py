@@ -469,7 +469,12 @@ class CloudBuilder:
     try:
       bucket = self.storage_client.bucket(self.bucket_name)
       blob = bucket.blob(log_file_uri)
-      log_content = self._extract_chat_history(blob.download_as_text())
+      raw_log = blob.download_as_text()
+      log_content = self._extract_chat_history(raw_log)
+      if not log_content:
+        # Preserve diagnostics even when the build fails before the agent
+        # writes its normal chat-history markers.
+        log_content = raw_log[-16 * 1024:]
       logging.warning(log_content)
       return log_content
     except NotFound as e:
@@ -582,6 +587,7 @@ class CloudBuilder:
 
     # Step 4: Download new result dill.
     cloud_build_log = ''
+    cloud_build_final_status = ''
     new_result_dill = os.path.join(dill_dir, new_result_filename)
     try:
       cloud_build_final_status = self._wait_for_build(build_id)
@@ -598,6 +604,14 @@ class CloudBuilder:
       cloud_build_log += f'Cloud build {build_id} cancled: {e}.\n'
 
     cloud_build_log += self._get_build_log(build_id)
+
+    if cloud_build_final_status != 'SUCCESS':
+      # A failed build cannot produce new_result.pkl. Return the original
+      # result with the complete diagnostic instead of attempting to
+      # deserialize a file that does not exist.
+      last_result = result_history[-1]
+      last_result.chat_history = {agent.name: cloud_build_log}
+      return last_result
 
     # Step 5: Deserialize dilld file.
     result = utils.deserialize_from_dill(new_result_dill)
