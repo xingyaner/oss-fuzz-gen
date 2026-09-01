@@ -72,16 +72,6 @@ update_report() {
   rm -rf results-report
   mkdir -p results-report
 
-  # Upload raw results first so execution logs remain available even when
-  # report.web fails on an incomplete result set.
-  if [[ -d "${RESULTS_DIR}" ]]; then
-    echo "Uploading raw results before report generation."
-    gcloud storage cp --recursive "${RESULTS_DIR:?}" \
-        "gs://oss-fuzz-gcb-experiment-run-logs/Result-reports/${GCS_DIR:?}" || return 1
-  else
-    echo "Raw results directory is not available yet."
-  fi
-
   # Generate the report
   echo "Generating report."
   if [[ $GCS_DIR != '' ]]; then
@@ -118,6 +108,18 @@ update_report() {
   done
 
   cd ..
+
+  # Upload raw results after publishing the report. A partial or empty
+  # results directory must not prevent the HTML report from being published.
+  if [[ -d "${RESULTS_DIR}" ]]; then
+    echo "Uploading raw results."
+    if ! gcloud storage cp --recursive "${RESULTS_DIR:?}" \
+        "gs://oss-fuzz-gcb-experiment-run-logs/Result-reports/${GCS_DIR:?}"; then
+      echo "Raw results upload failed; keeping the published report."
+    fi
+  else
+    echo "Raw results directory is not available yet."
+  fi
 
   echo "See the published report at https://llm-exp.oss-fuzz.com/Result-reports/${GCS_DIR:?}/"
 
