@@ -364,6 +364,9 @@ class CloudBuilder:
                     '-e',
                     'GOOGLE_CLOUD_LOCATION=' +
                     os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
+                    '-e',
+                    'VERTEXAI_LOCATION=' +
+                    os.getenv("GOOGLE_CLOUD_LOCATION", "global"),
                     '--network=cloudbuild',
                     '-e',
                     'DOCKER_API_VERSION=1.41',
