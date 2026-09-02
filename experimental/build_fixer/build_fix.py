@@ -1060,9 +1060,13 @@ class ExternalBuildFixAgent(BaseAgent):
 
   def _external_python(self, external_path: str) -> str:
     """Returns the Python interpreter for the external agent checkout."""
-    candidate = os.path.join(external_path, '.venv', 'bin', 'python')
-    if os.path.exists(candidate):
-      return candidate
+    candidates = [
+        os.path.join(external_path, '.venv', 'bin', 'python'),
+        '/opt/fix-build-agent-venv/bin/python',
+    ]
+    for candidate in candidates:
+      if os.path.exists(candidate):
+        return candidate
     return sys.executable
 
   def _resolve_external_path(self) -> str:
@@ -1128,11 +1132,13 @@ class ExternalBuildFixAgent(BaseAgent):
 
     try:
       external_env = self._external_env()
+      external_python = self._external_python(external_path)
+      logging.info('External fix-build Python: %s (exists=%s)', external_python,
+                   os.path.exists(external_python))
       command = [
-          self._external_python(external_path), 'agent.py', '--projects-yaml',
-          external_yaml, '--model', external_env['FIX_BUILD_AGENT_MODEL'],
-          '--api-base', external_env['FIX_BUILD_AGENT_API_BASE'],
-          '--skip-gh-auth-check'
+          external_python, 'agent.py', '--projects-yaml', external_yaml,
+          '--model', external_env['FIX_BUILD_AGENT_MODEL'], '--api-base',
+          external_env['FIX_BUILD_AGENT_API_BASE'], '--skip-gh-auth-check'
       ]
       logging.info('External fix-build command: %s', command)
       logging.info('External projects YAML: %s (exists=%s)', external_yaml,
