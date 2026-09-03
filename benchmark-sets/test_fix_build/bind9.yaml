@@ -9,3 +9,5 @@ engine: libfuzzer
 sanitizer: address
 architecture: x86_64
 base_image_digest: f51f7e08f410e2d4453693bb0cae3f6bdc53470e8b6bf33ae10fd98757f4e35c
+fixed_state: "no"
+state: "no"
