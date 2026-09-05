@@ -47,9 +47,8 @@ def _test_gemini_api_key(api_key: str, model: str) -> bool:
   """Tests Gemini Developer API / Google AI Studio API-key access."""
   print("[1/2] Testing Gemini API key access...")
   if not api_key:
-    print(
-        "SKIP: No API key provided via --api-key, GEMINI_API_KEY, or GOOGLE_API_KEY."
-    )
+    print("SKIP: No API key provided via --api-key, GEMINI_API_KEY, or "
+          "GOOGLE_API_KEY.")
     return False
 
   try:
@@ -71,9 +70,8 @@ def _test_vertex_ai(project: Optional[str], location: str, model: str) -> bool:
   """Tests Vertex AI Gemini access using Application Default Credentials."""
   print("[2/2] Testing Vertex AI Gemini access with ADC...")
   if not project:
-    print(
-        "SKIP: No --vertex-project provided. Vertex AI does not use an API key here."
-    )
+    print("SKIP: No --vertex-project provided. Vertex AI does not use an API "
+          "key here.")
     return False
 
   try:
@@ -92,13 +90,14 @@ def _test_vertex_ai(project: Optional[str], location: str, model: str) -> bool:
 
 
 def parse_args() -> argparse.Namespace:
+  """Parses command-line arguments."""
   parser = argparse.ArgumentParser(
       description="Verify Gemini API-key access and optional Vertex AI access.")
   parser.add_argument(
       "--api-key",
       default=os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or "",
-      help=
-      "Gemini API / Google AI Studio API key. Defaults to GEMINI_API_KEY or GOOGLE_API_KEY.",
+      help="Gemini API / AI Studio key. Defaults to GEMINI_API_KEY or "
+      "GOOGLE_API_KEY.",
   )
   parser.add_argument(
       "--model",
@@ -108,8 +107,8 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument(
       "--vertex-project",
       default=os.getenv("GOOGLE_CLOUD_PROJECT", ""),
-      help=
-      "GCP project ID for Vertex AI ADC test. Defaults to GOOGLE_CLOUD_PROJECT.",
+      help="GCP project ID for Vertex AI ADC test. Defaults to "
+      "GOOGLE_CLOUD_PROJECT.",
   )
   parser.add_argument(
       "--vertex-location",
@@ -134,12 +133,10 @@ def main() -> int:
                                 args.model)
 
   print("\nSummary:")
-  print(
-      f"- Gemini API / AI Studio key: {'OK' if api_key_ok else 'NOT OK or not tested'}"
-  )
-  print(
-      f"- Vertex AI Gemini / ADC: {'OK' if vertex_ok else 'NOT OK or not tested'}"
-  )
+  print(f"- Gemini API / AI Studio key: "
+        f"{'OK' if api_key_ok else 'NOT OK or not tested'}")
+  print(f"- Vertex AI Gemini / ADC: "
+        f"{'OK' if vertex_ok else 'NOT OK or not tested'}")
 
   if api_key_ok or vertex_ok:
     return 0

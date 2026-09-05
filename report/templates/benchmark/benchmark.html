@@ -31,6 +31,63 @@ limitations under the License.
 
 <h1 class="text-2xl mb-6 prettify-benchmark-name">{{ benchmark.id }}</h1>
 
+{% if repair_report %}
+<section class="toc-section repair-detail-card">
+    <div class="repair-detail-header">
+        <div>
+            <p class="repair-eyebrow">External build-fix agent</p>
+            <h2 class="text-xl font-bold">Repair evidence</h2>
+        </div>
+        <span class="repair-status {{ 'repair-status-success' if repair_report.status|lower in ['success', 'fixed'] else 'repair-status-failed' }}">{{ repair_report.status }}</span>
+    </div>
+
+    <div class="repair-chain">
+        <div class="repair-chain-step">
+            <span class="repair-step-label">Initial build failure</span>
+            {% if repair_report.repair_summary.initial_errors %}
+            <ul class="repair-evidence-list">
+                {% for error in repair_report.repair_summary.initial_errors %}<li><code>{{ error }}</code></li>{% endfor %}
+            </ul>
+            {% else %}<p class="repair-muted">Original build error unavailable.</p>{% endif %}
+        </div>
+        <div class="repair-chain-connector">→</div>
+        <div class="repair-chain-step">
+            <span class="repair-step-label">Intermediate evolution</span>
+            {% if repair_report.repair_summary.intermediate %}<p>{{ repair_report.repair_summary.intermediate }}</p>{% else %}<p class="repair-muted">No intermediate failure recorded.</p>{% endif %}
+        </div>
+        <div class="repair-chain-connector">→</div>
+        <div class="repair-chain-step repair-chain-root">
+            <span class="repair-step-label">Root cause</span>
+            {% if repair_report.repair_summary.root_cause %}<p>{{ repair_report.repair_summary.root_cause }}</p>{% else %}<p class="repair-muted">Root cause not verified</p>{% endif %}
+            <small>{{ repair_report.repair_summary.root_status }}</small>
+        </div>
+    </div>
+
+    <div class="repair-reason">
+        <span class="repair-step-label">Why the patch works</span>
+        <p>{{ repair_report.repair_summary.reason }}</p>
+    </div>
+
+    <div class="repair-metrics">
+        <div><span>Upstream → downstream</span><strong>{{ repair_report.metrics.upstream_repo }} → {{ repair_report.metrics.downstream_repo }}</strong></div>
+        <div><span>Files changed</span><strong>{{ repair_report.metrics.files_changed }}</strong></div>
+        <div><span>Lines changed</span><strong>{{ repair_report.metrics.lines_changed }}</strong></div>
+        <div><span>Tokens in / out</span><strong>{{ repair_report.metrics.input_tokens }} / {{ repair_report.metrics.output_tokens }}</strong></div>
+        <div><span>Time cost</span><strong>{{ repair_report.metrics.time_cost }}</strong></div>
+        <div><span>Attempts / repairs</span><strong>{{ repair_report.metrics.attempt_rounds }} / {{ repair_report.metrics.repair_rounds }}</strong></div>
+    </div>
+
+    {% if repair_report.patches %}
+    <details class="repair-patches" open>
+        <summary>Patch diff</summary>
+        {% for name, patch in repair_report.patches %}
+        <div class="repair-patch-block"><p>{{ name }}</p><pre>{{ patch }}</pre></div>
+        {% endfor %}
+    </details>
+    {% endif %}
+</section>
+{% endif %}
+
 <div class="toc-section">
     <h2 class="text-lg mb-4">Samples</h2>
     <table class="sortable-table">

@@ -43,12 +43,11 @@ from tool.base_tool import BaseTool
 from tool.container_tool import ProjectContainerTool
 
 FIXER_TOOLS = [{
-    'type':
-        'function',
-    'name':
-        'test_build_script',
+    'type': 'function',
+    'name': 'test_build_script',
     'description':
-        'Tests a build script against target project. Use this for tesing build scripts that you suspect might work.',
+        ('Tests a build script against the target project. Use this for '
+         'testing build scripts that may work.'),
     'parameters': {
         'type': 'object',
         'properties': {
@@ -83,12 +82,11 @@ FIXER_TOOLS = [{
         'additionalProperties': False
     }
 }, {
-    'type':
-        'function',
-    'name':
-        'run_commands_in_container',
+    'type': 'function',
+    'name': 'run_commands_in_container',
     'description':
-        'Runs a command string in the project container. Use this for exploring the target project, such as running commands to inspect the project or its dependencies.',
+        ('Runs commands in the project container for exploring the project '
+         'or its dependencies.'),
     'parameters': {
         'type': 'object',
         'properties': {
@@ -236,6 +234,8 @@ class BuildFixAgent(BaseAgent):
                use_tools: bool = True,
                trial: int = 1):
     super().__init__(trial=trial, llm=llm, args=args)
+    # Keep an explicit attribute for static analyzers and logging adapters.
+    self.trial = trial
     self.project_name = project_name
     self.original_project_name = project_name
     self.work_dirs = work_dirs
@@ -383,7 +383,8 @@ class BuildFixAgent(BaseAgent):
     build_result.compiles = self.compiles
     build_result.binary_exists = self.check_all_passed
     build_result.is_function_referenced = self.check_all_passed
-    build_result.compile_error = '' if self.check_all_passed else self.last_result
+    build_result.compile_error = ('' if self.check_all_passed else
+                                  self.last_result)
     build_result.compile_log = self.last_result
     build_result.build_script_source = self.success_build_script
     build_result.chat_history = {
@@ -967,6 +968,7 @@ class ExternalBuildFixAgent(BaseAgent):
     os.makedirs(archive_dir, exist_ok=True)
     return archive_dir
 
+  # pylint: disable=unused-argument
   def _copy_external_artifacts(self, external_path: str, log_path: str,
                                log_text: str) -> None:
     """Copies the external agent's own outputs into oss-fuzz-gen results."""
@@ -1084,6 +1086,7 @@ class ExternalBuildFixAgent(BaseAgent):
     return configured_path
 
   def execute(self, result_history: list[Result]) -> BuildResult:
+    """Runs the external build-fix agent and collects its artifacts."""
     configured_path = os.path.realpath(self.args.external_fix_build_agent_path)
     external_path = self._resolve_external_path()
     logging.info('Configured external agent path: %s', configured_path)

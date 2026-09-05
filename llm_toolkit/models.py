@@ -43,7 +43,7 @@ from vertexai.preview.generative_models import (ChatSession, GenerationResponse,
 from vertexai.preview.language_models import CodeGenerationModel
 
 from llm_toolkit import prompts
-from utils import retryable
+from utils import retryable  # pylint: disable=no-name-in-module
 
 logger = logging.getLogger(__name__)
 
@@ -485,9 +485,8 @@ class OpenAICompatible(GPT):
   def chat_llm(self, client: Any, prompt: prompts.Prompt) -> str:
     """Queries an OpenAI-compatible chat completion endpoint."""
     if self.ai_binary:
-      raise ValueError(
-          f'OpenAI-compatible model does not use local AI binary: {self.ai_binary}'
-      )
+      raise ValueError('OpenAI-compatible model does not use local AI binary: '
+                       f'{self.ai_binary}')
     if self.temperature_list:
       logger.info('OpenAI-compatible API does not allow temperature list: %s',
                   self.temperature_list)
@@ -855,7 +854,7 @@ class VertexAIModel(GoogleModel):
     parameters_list = self._prepare_parameters()
 
     for i in range(self.num_samples):
-      # Handle ValueError thrown when LLM maxes out output token when generating response
+      # Handle output-token exhaustion from the model.
       response = self.with_retry_on_error(
           lambda i=i: self.do_generate(model, prompt.get(), parameters_list[i]),
           [GoogleAPICallError, ValueError]) or ''
@@ -868,7 +867,7 @@ class VertexAIModel(GoogleModel):
     model = self.get_model()
     # TODO: Allow each trial to customize its parameters_list.
     parameter = self._prepare_parameters()[0]
-    # Handle ValueError thrown when LLM maxes out output token when generating response
+    # Handle output-token exhaustion from the model.
     response = self.with_retry_on_error(
         lambda: self.do_generate(model, prompt.get(), parameter),
         [GoogleAPICallError, ValueError]) or ''

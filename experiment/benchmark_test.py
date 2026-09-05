@@ -24,6 +24,7 @@ class BenchmarkTest(unittest.TestCase):
   """Tests Benchmark construction from YAML."""
 
   def test_from_yaml_accepts_project_level_fix_build_benchmark(self):
+    """Accepts project-level metadata for a fix-build benchmark."""
     content = """
 project: zlib
 language: c

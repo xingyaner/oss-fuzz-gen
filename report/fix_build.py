@@ -16,10 +16,12 @@
 import argparse
 import html
 import json
+import re
 import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import yaml
 
@@ -68,7 +70,8 @@ def _find_project_dirs(results_dir: Path) -> list[Path]:
       # through known implementation folders before registering the project.
       project_dir = artifact.parent
       while project_dir.parent != results_dir and project_dir.name in {
-          'external-agent', 'fixed-files', 'process_fixed', 'process_unfixed'
+          'repair', 'external-agent', 'fixed-files', 'process_fixed',
+          'process_unfixed'
       }:
         project_dir = project_dir.parent
       if project_dir != results_dir:
@@ -110,6 +113,15 @@ def _project_record(project_dir: Path) -> dict[str, Any]:
                        path.suffix != '.patch')
 
   result_text = _read_text(result_path) if result_path else ''
+  root_location = _final_field(result_text, 'Root Cause Location').lower()
+  root_cause, intermediate, root_status = _trace_summary(trace)
+  if root_location in ('true', 'yes', 'success'):
+    root_status = '已定位'
+  elif root_location in ('false', 'no', 'failure'):
+    root_status = '未验证'
+  stats = _patch_stats([(str(path.relative_to(project_dir)), _read_text(path))
+                        for path in patch_files])
+  upstream_url = str(metadata.get('software_repo_url', ''))
   status = str(
       metadata.get('fix_result') or
       ('Success' if 'SUCCESS' in result_text.upper() else 'Unknown'))
@@ -126,6 +138,41 @@ def _project_record(project_dir: Path) -> dict[str, Any]:
           trace,
       'result_text':
           result_text,
+      'repair_summary': {
+          'root_cause':
+              root_cause,
+          'root_status':
+              root_status,
+          'intermediate':
+              intermediate,
+          'initial_errors':
+              _key_build_errors(
+                  _read_remote_log(
+                      str(metadata.get('fuzzing_build_error_log', '')))),
+          'reason':
+              _repair_reason(trace) or '修复理由未在账本中提供。',
+      },
+      'metrics': {
+          'upstream_repo':
+              _repo_name(upstream_url),
+          'downstream_repo':
+              'oss-fuzz',
+          'files_changed':
+              _final_field(result_text, 'Files Change') or stats['files'],
+          'lines_changed':
+              _final_field(result_text, 'Lines Change')
+              or stats['added'] + stats['deleted'],
+          'input_tokens':
+              _final_field(result_text, 'Input Tokens') or '0',
+          'output_tokens':
+              _final_field(result_text, 'Output Tokens') or '0',
+          'time_cost':
+              _final_field(result_text, 'Time Cost') or 'unknown',
+          'attempt_rounds':
+              _final_field(result_text, 'Attempt Rounds') or '0',
+          'repair_rounds':
+              _final_field(result_text, 'Repair Rounds') or '0',
+      },
       'run_log':
           _read_text(run_log_path) if run_log_path else '',
       'original_build_log':
@@ -142,6 +189,89 @@ def _project_record(project_dir: Path) -> dict[str, Any]:
 def _pre(value: str) -> str:
   """Escapes text for a report preformatted block."""
   return html.escape(value or '(none)')
+
+
+def _final_field(result_text: str, label: str) -> str:
+  match = re.search(rf'^\s*-?\s*\[?{re.escape(label)}\]?\s*:\s*(.*?)\s*$',
+                    result_text, re.MULTILINE | re.IGNORECASE)
+  return match.group(1).strip() if match else ''
+
+
+def _repo_name(url: str) -> str:
+  path = urlparse(url).path.rstrip('/')
+  return Path(path).name.removesuffix('.git') if path else 'unknown'
+
+
+def _key_build_errors(log_text: str, limit: int = 3) -> list[str]:
+  patterns = re.compile(
+      r'(error:|fatal:|failed|failure|not recognized|undefined reference|'
+      r'cannot |no such file|does not exist|linker)', re.IGNORECASE)
+  lines = []
+  for line in log_text.splitlines():
+    clean = re.sub(r'\x1b\[[0-9;]*m', '', line).strip()
+    if clean and patterns.search(clean) and clean not in lines:
+      lines.append(clean)
+  return lines[:limit]
+
+
+def _trace_summary(trace: dict[str, Any]) -> tuple[str, str, str]:
+  """Summarizes root-cause and intermediate evidence from the trace."""
+  nodes = trace.get('nodes', [])
+  nodes = nodes if isinstance(nodes, list) else []
+  root_located = False
+  root_cause = ''
+  intermediate = []
+  for node in nodes:
+    validation = node.get('validation', {}) if isinstance(node, dict) else {}
+    action = node.get('action_and_intent', {}) if isinstance(node, dict) else {}
+    if isinstance(action, dict):
+      if action.get('root_cause_commit_sha') not in ('', 'N/A', None):
+        root_located = True
+        root_cause = str(action.get('root_cause_commit_sha'))
+      problem = node.get('semantic_memory', {}).get('unsolved_problems', '')
+      if problem and problem != 'N/A':
+        intermediate.append(str(problem))
+      if not root_cause:
+        strategy = str(action.get('repair_strategy', ''))
+        if strategy:
+          root_cause = strategy.split('Reasoning:', 1)[0].strip()
+    if isinstance(validation, dict):
+      report = validation.get('validation_report_after', {})
+      if isinstance(report, dict) and any(
+          str(value).startswith('pass') for value in report.values()):
+        root_located = root_located or bool(
+            action.get('root_cause_commit_sha') not in ('', 'N/A', None))
+  return (root_cause if root_located else '', ' → '.join(intermediate[-2:]),
+          '已定位' if root_located else '未验证')
+
+
+def _repair_reason(trace: dict[str, Any]) -> str:
+  """Extracts a concise, evidence-backed repair rationale."""
+  nodes = trace.get('nodes', [])
+  if not isinstance(nodes, list):
+    return ''
+  for node in reversed(nodes):
+    action = node.get('action_and_intent', {}) if isinstance(node, dict) else {}
+    strategy = (action.get('repair_strategy', '')
+                if isinstance(action, dict) else '')
+    if strategy:
+      reason = strategy.split('Reasoning:', 1)[-1].strip()
+      return re.split(r'(?<=[.!?])\s+', reason, maxsplit=2)[0][:500]
+  return ''
+
+
+def _patch_stats(patches: list[tuple[str, str]]) -> dict[str, int]:
+  """Counts changed patch files and added or deleted lines."""
+  files = set()
+  added = deleted = 0
+  for name, content in patches:
+    files.add(name)
+    for line in content.splitlines():
+      if line.startswith('+++') or line.startswith('---'):
+        continue
+      added += int(line.startswith('+'))
+      deleted += int(line.startswith('-'))
+  return {'files': len(files), 'added': added, 'deleted': deleted}
 
 
 def _section(title: str, content: str, open_by_default: bool = False) -> str:
@@ -168,15 +298,16 @@ def _project_html(record: dict[str, Any]) -> str:
   for name, content in record['fixed_files']:
     sections.append(_section(f'Fixed file: {name}', content))
   details = ''.join(sections)
-  return (
-      f'<article><h2>{html.escape(record["project"])}: '
-      f'<span class="status">{html.escape(record["status"])}</span></h2>'
-      '<dl>'
-      f'<dt>Repair rounds</dt><dd>{record["rounds"]}</dd>'
-      f'<dt>Original build failure</dt><dd>{source_link}</dd>'
-      f'<dt>Project revision</dt><dd><code>{_pre(str(metadata.get("software_sha", "")))}</code></dd>'
-      f'<dt>OSS-Fuzz revision</dt><dd><code>{_pre(str(metadata.get("oss-fuzz_sha", "")))}</code></dd>'
-      '</dl>' + details + '</article>')
+  return (f'<article><h2>{html.escape(record["project"])}: '
+          f'<span class="status">{html.escape(record["status"])}</span></h2>'
+          '<dl>'
+          f'<dt>Repair rounds</dt><dd>{record["rounds"]}</dd>'
+          f'<dt>Original build failure</dt><dd>{source_link}</dd>'
+          '<dt>Project revision</dt><dd><code>'
+          f'{_pre(str(metadata.get("software_sha", "")))}</code></dd>'
+          '<dt>OSS-Fuzz revision</dt><dd><code>'
+          f'{_pre(str(metadata.get("oss-fuzz_sha", "")))}</code></dd>'
+          '</dl>' + details + '</article>')
 
 
 def generate_report(results_dir: str, output_dir: str, model: str = '') -> None:

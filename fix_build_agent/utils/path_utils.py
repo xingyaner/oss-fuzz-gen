@@ -13,7 +13,7 @@
 # limitations under the License.
 """
 Unified Path Parsing and Validation Tool (Upgrade Version)
-Features dynamic workspace discovery, secure path guards, and dynamic whitelist loading.
+Features workspace discovery, secure path guards, and dynamic whitelist loading.
 Aligned strictly with the system's authorized read/write boundaries.
 """
 import os
@@ -25,8 +25,8 @@ import yaml
 
 def detect_project_root() -> str:
   """
-    Dynamically detects the project workspace root directory by walking upwards
-    from the current file location until finding 'config/path_whitelist.yaml' or '.git'.
+    Detects the workspace root by walking upwards from this file until finding
+    'config/path_whitelist.yaml' or '.git'.
     Falls back to the environment variable PROJECT_ROOT or current working directory.
     """
   # 优先使用系统环境变量
@@ -48,8 +48,8 @@ def detect_project_root() -> str:
 
 def load_whitelist_config(config_path: Optional[str] = None) -> List[str]:
   """
-    Loads allowed path prefixes from config/path_whitelist.yaml.
-    Falls back to a default hardcoded whitelist if loading fails or file is missing.
+    Loads allowed path prefixes from config/path_whitelist.yaml. Falls back to
+    defaults if loading fails or the file is missing.
     Matches the strict read/write boundaries authorized by the user.
     """
   # 物理授权读写白名单（严格契约对齐）
@@ -183,7 +183,7 @@ def validate_patch_path(file_path: str,
 
 def ensure_relative_path(file_path: str, base_dir: Optional[str] = None) -> str:
   """
-    Force ensure the path is in relative format (used for instruction validation)
+    Ensures the path is relative for instruction validation.
 
     Raises:
         ValueError: When the path cannot be converted to a relative path

@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Formatting helpers for path validation errors."""
 
 from typing import Any, Optional
 
@@ -21,8 +22,8 @@ def format_path_error(original_path: str,
                       validation_passed: Optional[bool] = None,
                       extra_info: Optional[dict[str, Any]] = None) -> str:
   """
-    Formats path-related error information for debugging with standardized PATH GUIDANCE.
-    Dynamically renders target directories relative to the current project base.
+    Formats path-related error information with standardized PATH GUIDANCE.
+    Dynamically renders directories relative to the current project base.
 
     Args:
         original_path: The original path provided by the agent

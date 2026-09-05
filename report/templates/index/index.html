@@ -40,6 +40,56 @@ limitations under the License.
     chartsOpen: true,
 }" class="space-y-2">
 
+    {% if repair_reports %}
+    {% set repair_ns = namespace(total=0, successful=0) %}
+    {% for benchmark_id, repair in repair_reports.items() %}
+        {% set repair_ns.total = repair_ns.total + 1 %}
+        {% if repair.status|lower in ['success', 'fixed'] %}
+            {% set repair_ns.successful = repair_ns.successful + 1 %}
+        {% endif %}
+    {% endfor %}
+    <div class="border rounded-lg toc-section repair-summary-card">
+        <div class="p-4 border-b repair-summary-heading">
+            <div>
+                <h2 class="text-lg font-bold">Build repair summary</h2>
+                <p class="text-sm opacity-75 mt-1">Evidence-backed repair results from the external build-fix agent.</p>
+            </div>
+            <div class="repair-success-badge">
+                {{ repair_ns.successful }}/{{ repair_ns.total }} successful
+            </div>
+        </div>
+        <div class="p-4 overflow-x-auto">
+            <table class="sortable-table min-w-full">
+                <thead>
+                    <tr>
+                        <th>Project</th>
+                        <th>Status</th>
+                        <th>Failure chain</th>
+                        <th>Repositories</th>
+                        <th>Files / lines</th>
+                        <th>Repair rounds</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for benchmark_id, repair in repair_reports.items() %}
+                    <tr>
+                        <td><a class="font-semibold" href="benchmark/{{ benchmark_id|urlencode }}/index.html">{{ repair.project }}</a></td>
+                        <td><span class="repair-status {{ 'repair-status-success' if repair.status|lower in ['success', 'fixed'] else 'repair-status-failed' }}">{{ repair.status }}</span></td>
+                        <td class="repair-chain-cell">
+                            {% if repair.repair_summary.initial_errors %}{{ repair.repair_summary.initial_errors[0] }}{% else %}Initial build error unavailable{% endif %}
+                            {% if repair.repair_summary.intermediate %}<span class="repair-arrow">→</span>{{ repair.repair_summary.intermediate }}{% endif %}
+                        </td>
+                        <td><code>{{ repair.metrics.upstream_repo }}</code> → <code>{{ repair.metrics.downstream_repo }}</code></td>
+                        <td>{{ repair.metrics.files_changed }} / {{ repair.metrics.lines_changed }}</td>
+                        <td>{{ repair.metrics.repair_rounds }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    {% endif %}
+
     <div class="border rounded-lg toc-section">
         <button @click="benchmarkOpen = !benchmarkOpen"
                 class="w-full p-4 flex justify-between items-center">

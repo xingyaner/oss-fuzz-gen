@@ -19,8 +19,10 @@ from experimental.build_fixer.build_fix import _fix_build_agent_model_config
 
 
 class FixBuildAgentModelConfigTest(unittest.TestCase):
+  """Tests model configuration for the build-fix agent."""
 
   def test_deepseek_uses_openai_compatible_settings(self):
+    """Maps DeepSeek to OpenAI-compatible settings."""
     config = _fix_build_agent_model_config(
         'openai_compatible', {
             'OPENAI_COMPATIBLE_MODEL': 'deepseek-chat',
@@ -38,6 +40,7 @@ class FixBuildAgentModelConfigTest(unittest.TestCase):
     self.assertEqual(config['api_key'], 'openai-test-key')
 
   def test_azure_requires_deployment_and_maps_endpoint(self):
+    """Requires Azure deployment settings and maps the endpoint."""
     with self.assertRaisesRegex(ValueError, 'Azure OpenAI requires'):
       _fix_build_agent_model_config('gpt-4o-azure', {})
     config = _fix_build_agent_model_config(

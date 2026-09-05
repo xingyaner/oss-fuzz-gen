@@ -53,7 +53,7 @@ def _model_result_family(model: str) -> str:
   return model or 'default'
 
 
-def _local_results_dir(args: argparse.Namespace) -> str:
+def _local_results_dir(args: argparse.Namespace) -> str:  # pylint: disable=unused-argument
   """Returns the directory that contains the current experiment results."""
   return 'results'
 

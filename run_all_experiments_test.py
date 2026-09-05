@@ -20,8 +20,10 @@ from run_all_experiments import _model_result_family
 
 
 class ModelResultFamilyTest(unittest.TestCase):
+  """Tests model-family result directory selection."""
 
   def test_uses_requested_model_not_stale_deepseek_environment(self):
+    """Uses the requested model despite a stale environment variable."""
     old_model = os.environ.get('DEEPSEEK_MODEL')
     try:
       os.environ['DEEPSEEK_MODEL'] = 'deepseek-chat'
@@ -35,6 +37,7 @@ class ModelResultFamilyTest(unittest.TestCase):
         os.environ['DEEPSEEK_MODEL'] = old_model
 
   def test_openai_compatible_and_deepseek_use_deepseek_family(self):
+    """Maps compatible and DeepSeek models to the DeepSeek result family."""
     self.assertEqual(_model_result_family('openai_compatible'), 'deepseek')
     self.assertEqual(_model_result_family('deepseek-chat'), 'deepseek')
 

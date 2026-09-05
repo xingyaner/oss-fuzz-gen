@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""Tests for agent path normalization."""
 
 import os
 import pathlib
@@ -29,10 +30,10 @@ from utils.path_utils import normalize_patch_path
 
 
 class TestNormalizePatchPath(unittest.TestCase):
-  """Cross-host path normalization test: does not depend on any local absolute paths"""
+  """Test cross-host path normalization without host-specific paths."""
 
   def setUp(self):
-    # 1. Create a temporary directory as the simulated project root to fully isolate the host environment
+    # Create a temporary directory to isolate the simulated project root.
     self.temp_dir = tempfile.TemporaryDirectory()
     self.base_dir = self.temp_dir.name
 
