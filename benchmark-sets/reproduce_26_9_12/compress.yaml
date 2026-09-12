@@ -1,0 +1,13 @@
+project: compress
+language: go
+error_time: '2026-09-05'
+oss-fuzz_sha: b2eee1cf755e4828a81a7949232e1bc5452d92fc
+fuzzing_build_error_log: https://oss-fuzz-build-logs.storage.googleapis.com/log-4a7a9b3c-0af1-4018-b3f7-515b9e996d27.txt
+software_repo_url: https://github.com/klauspost/compress
+software_sha: 75489f96c542c09a1a1af296d68c3cbfe4d2bcc0
+engine: libfuzzer
+sanitizer: address
+architecture: x86_64
+base_image_digest: e5e5ecf4fb18a2f47bf0462c37e35728e8f6023ee4b7ff8bc5f903e6acba46da
+error_category: RC13
+fixed_state: 'no'

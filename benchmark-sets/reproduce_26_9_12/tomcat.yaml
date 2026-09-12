@@ -1,0 +1,13 @@
+project: tomcat
+language: jvm
+error_time: '2026-08-12'
+oss-fuzz_sha: f9bb0e53534a5bf5a8e08524d10ad7b3fdfb0c7b
+fuzzing_build_error_log: https://oss-fuzz-build-logs.storage.googleapis.com/log-2911e6bf-d54d-4d78-9f17-30f595e4a9be.txt
+software_repo_url: https://github.com/apache/tomcat
+software_sha: 16e57c5ccd21df0fd81aca420cd0c0b839fb5f58
+engine: libfuzzer
+sanitizer: address
+architecture: x86_64
+base_image_digest: cc3c3da52c2f48d7a6caf1d5736ab8ec8cb213f4345329b33cb6e497780b1ed0
+error_category: RC19
+fixed_state: 'no'

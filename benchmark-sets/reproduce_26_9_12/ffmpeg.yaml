@@ -1,0 +1,13 @@
+project: ffmpeg
+language: c++
+error_time: '2026-09-11'
+oss-fuzz_sha: 3209d05c48ad1232ab0c5797f6ed31a1486c2a80
+fuzzing_build_error_log: https://oss-fuzz-build-logs.storage.googleapis.com/log-52158d81-b11b-4bd9-90cb-b1c479931014.txt
+software_repo_url: https://github.com/FFmpeg/FFmpeg
+software_sha: 61cabd62cbf0d240620ef7caa382d665268e61b4
+engine: libFuzzer
+sanitizer: address
+architecture: x86_64
+base_image_digest: 8b4a73d83374b298a0a771eeec9a1d44ceff3416a678b7d7946303389d022aca
+error_category: RC4
+fixed_state: 'no'
