@@ -12,22 +12,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import fnmatch
-import json
-import logging
 import os
 import re
 import subprocess
-import textwrap
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
 
 import litellm
+import json
+import yaml
 import openpyxl
+import tempfile
+import fnmatch
+import logging
+import textwrap
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Tuple, Callable, Optional, Set, Any
 from google.adk.tools.tool_context import ToolContext
-
-from utils.error_handler import format_path_error
 from utils.path_utils import normalize_patch_path, validate_patch_path
+from utils.error_handler import format_path_error
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,218 @@ PROCESSED_PROJECTS_FILE = os.path.join(PROCESSED_PROJECTS_DIR,
 GLOBAL_CHAR_BUDGET = 280000  # 硬编码
 max_lines = 2500  # 硬编码
 _LATEST_BASIC_INFORMATION: Dict[str, Any] = {}
+APPLIED_PATCH_TARGETS: Set[str] = set()
+_ACTIVE_PROJECT_NAME: Optional[str] = None
+_PROJECT_PHASE = "idle"
+
+
+def set_active_project_context(project_name: Optional[str]) -> None:
+  """Set the only project that may invoke project-scoped build tools."""
+  global _ACTIVE_PROJECT_NAME
+  _ACTIVE_PROJECT_NAME = project_name
+
+
+def set_project_phase(phase: str) -> None:
+  """Set the lifecycle phase used to reject late project-side tool calls."""
+  global _PROJECT_PHASE
+  if phase not in {"idle", "main", "draining", "optimizer"}:
+    raise ValueError(f"Unknown project phase: {phase}")
+  _PROJECT_PHASE = phase
+
+
+def _reject_if_project_phase_stopped(
+    operation: str) -> Optional[Dict[str, str]]:
+  if _PROJECT_PHASE == "draining":
+    message = f"Rejected new {operation}: project workflow is draining and no new tool calls are accepted."
+    print(f"[STATE ISOLATION] {message}")
+    return {"status": "error", "message": message}
+  return None
+
+
+BUILD_GENERATED_ARTIFACT_PATTERNS = ("main.*.go", "*_fuzz.go", "*.orig",
+                                     "go.sum", "fuzz*.a", "fuzz*.h", "*.o",
+                                     "*.dSYM")
+
+# These are environment-locking lines generated for the build environment.
+# Only changed lines with these exact content prefixes are excluded; other
+# Dockerfile changes remain part of the repair patch.
+DOCKERFILE_EXCLUDED_PATCH_PREFIXES = (
+    "FROM gcr.io/oss-fuzz-base/",
+    "RUN git clone --depth 1 https://github.com",
+    "RUN git clone --depth 1 http://github.com",
+    "RUN git clone  https://github.com",
+)
+
+
+def _is_excluded_dockerfile_change(path: str, diff_line: str) -> bool:
+  """Return whether one added/deleted Dockerfile line is environment-only."""
+  if os.path.basename(path).lower() != "dockerfile":
+    return False
+  if not diff_line or diff_line[0] not in "+-" or diff_line.startswith(
+      ("+++", "---")):
+    return False
+  return diff_line[1:].startswith(DOCKERFILE_EXCLUDED_PATCH_PREFIXES)
+
+
+def filter_dockerfile_diff(diff_text: str, path: str) -> str:
+  """Remove only configured Dockerfile change lines and repair zero-context hunks."""
+  if os.path.basename(path).lower() != "dockerfile":
+    return diff_text
+
+  lines = diff_text.splitlines(keepends=True)
+  output = []
+  index = 0
+  hunk_pattern = re.compile(r"^(@@ -\d+)(,\d+)?( \+\d+)(,\d+)? @@(.*)$")
+  while index < len(lines):
+    line = lines[index]
+    match = hunk_pattern.match(line.rstrip("\r\n"))
+    if not match:
+      output.append(line)
+      index += 1
+      continue
+
+    hunk_lines = []
+    index += 1
+    while index < len(lines) and not lines[index].startswith("@@ "):
+      hunk_lines.append(lines[index])
+      index += 1
+    kept = [
+        line for line in hunk_lines
+        if not _is_excluded_dockerfile_change(path, line)
+    ]
+    old_count = sum(1 for item in kept if item.startswith(" ") or
+                    (item.startswith("-") and not item.startswith("---")))
+    new_count = sum(1 for item in kept if item.startswith(" ") or
+                    (item.startswith("+") and not item.startswith("+++")))
+    if old_count == 0 and new_count == 0:
+      continue
+    old_start = match.group(1)
+    new_start = match.group(3)
+    suffix = match.group(5)
+    output.append(
+        f"{old_start},{old_count}{new_start},{new_count} @@{suffix}\n")
+    output.extend(kept)
+  return "".join(output) if any(
+      line.startswith("@@ ") for line in output) else ""
+
+
+def get_filtered_git_diff(repo_path: str,
+                          baseline_sha: str,
+                          paths: list[str],
+                          target_ref: str = "HEAD") -> str:
+  """Return a patch with only the explicitly allowed Dockerfile filtering."""
+  chunks = []
+  for path in paths:
+    diff_options = ["--unified=0"
+                   ] if os.path.basename(path).lower() == "dockerfile" else []
+    result = subprocess.run([
+        "git", "-C", repo_path, "diff", *diff_options, baseline_sha, target_ref,
+        "--", path
+    ],
+                            capture_output=True,
+                            text=True,
+                            check=False)
+    if result.returncode != 0:
+      continue
+    filtered = filter_dockerfile_diff(result.stdout, path)
+    if filtered:
+      chunks.append(filtered)
+  return "".join(chunks)
+
+
+def get_filtered_git_metrics(repo_path: str,
+                             baseline_sha: str,
+                             paths: list[str],
+                             target_ref: str = "HEAD") -> Dict[str, Any]:
+  """Measure the effective complete patch after the Dockerfile line filter."""
+  statuses_result = subprocess.run([
+      "git", "-C", repo_path, "diff", "--name-status", baseline_sha, target_ref,
+      "--", *paths
+  ],
+                                   capture_output=True,
+                                   text=True,
+                                   check=False)
+  statuses = {}
+  added = deleted = hunks = 0
+  for row in statuses_result.stdout.splitlines():
+    fields = row.split("\t")
+    if len(fields) < 2:
+      continue
+    path = fields[-1]
+    diff = get_filtered_git_diff(repo_path, baseline_sha, [path], target_ref)
+    if not diff:
+      continue
+    statuses[path] = fields[0]
+    hunks += sum(1 for line in diff.splitlines() if line.startswith("@@ "))
+    for line in diff.splitlines():
+      if line.startswith("+") and not line.startswith("+++"):
+        added += 1
+      elif line.startswith("-") and not line.startswith("---"):
+        deleted += 1
+  return {
+      "files": len(statuses),
+      "added": added,
+      "deleted": deleted,
+      "hunks": hunks,
+      "statuses": statuses
+  }
+
+
+def get_verified_snapshot_patches(snapshot: Dict[str, str]) -> Dict[str, Any]:
+  """Build final patches and metrics from original and latest verified refs."""
+  result = {
+      "source_patch": "",
+      "config_patch": "",
+      "metrics": {
+          "files": 0,
+          "added": 0,
+          "deleted": 0,
+          "hunks": 0
+      }
+  }
+  groups = (
+      ("source_path", "original_source_sha", "latest_source_sha",
+       "source_patch"),
+      ("config_repo_path", "original_config_sha", "latest_config_sha",
+       "config_patch"),
+  )
+  for path_key, base_key, target_key, patch_key in groups:
+    repo_path = snapshot.get(path_key)
+    base_ref, target_ref = snapshot.get(base_key), snapshot.get(target_key)
+    if not repo_path or not base_ref or not target_ref or base_ref in (
+        "N/A", "PENDING"):
+      continue
+    listed = subprocess.run(
+        [
+            "git", "-C", repo_path, "diff", "--name-only", base_ref, target_ref,
+            "--", "."
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    paths = [
+        item.strip()
+        for item in listed.stdout.splitlines()
+        if item.strip() and not is_build_generated_artifact(item.strip())
+    ]
+    if not paths:
+      continue
+    metrics = get_filtered_git_metrics(repo_path, base_ref, paths, target_ref)
+    result[patch_key] = get_filtered_git_diff(repo_path, base_ref, paths,
+                                              target_ref)
+    for key in ("files", "added", "deleted", "hunks"):
+      result["metrics"][key] += metrics[key]
+  return result
+
+
+def is_build_generated_artifact(relative_path: str) -> bool:
+  """Identify known build outputs that are not repair-source evidence."""
+  normalized = relative_path.replace("\\", "/")
+  return any(
+      fnmatch.fnmatch(normalized, pattern) or
+      fnmatch.fnmatch(os.path.basename(normalized), pattern)
+      for pattern in BUILD_GENERATED_ARTIFACT_PATTERNS)
 
 
 def extract_basic_information(raw_basic_information: Any) -> Dict[str, Any]:
@@ -338,14 +551,9 @@ def update_trace_ledger(node_id: int,
     Safely writes file diff metrics, active workspace, and Git SHAs into project_repair_trace.json.
     """
   try:
-    basic_info = extract_basic_information(
-        tool_context.session.state.get("basic_information") if tool_context and
-        getattr(tool_context, "session", None) else _LATEST_BASIC_INFORMATION)
+    # repo_path is an explicit caller-selected repository. Session state
+    # is diagnostic context only and must not redirect ledger writes.
     target_file = fields_dict.get("action_and_intent.target_file", "")
-    if target_file.startswith("process/project/"):
-      repo_path = basic_info.get("project_source_path") or repo_path
-    elif target_file.startswith("oss-fuzz/projects/"):
-      repo_path = basic_info.get("project_config_repo_path") or repo_path
 
     print("[DEBUG update_trace_ledger args] "
           f"node_id={node_id} | repo_path={repo_path} | "
@@ -476,7 +684,6 @@ def _safe_path_wrapper(*d_args, **d_kwargs):
   import functools
   import os
   from typing import Callable
-
   from google.adk.tools.tool_context import ToolContext
 
   # 1. 编译期解析有参传入的操作名称（兼容位置/关键字参数）
@@ -532,8 +739,8 @@ def _safe_path_wrapper(*d_args, **d_kwargs):
       strict_mode = kwargs.get('strict_mode', True)
 
       # 导入白名单验证逻辑与标准路径错误引导
-      from utils.error_handler import format_path_error
       from utils.path_utils import normalize_patch_path, validate_patch_path
+      from utils.error_handler import format_path_error
 
       normalized = normalize_patch_path(path_arg, base_dir)
       if strict_mode and not validate_patch_path(normalized, strict=True):
@@ -681,6 +888,7 @@ def apply_patch(solution_file_path: str, **kwargs) -> dict:
     for block in patch_blocks:
       parts = block.split('---=== ORIGINAL ===---')
       original_target = parts[0].strip()
+      normalized_target = normalize_patch_path(original_target, base_dir)
       content_parts = parts[1].split('---=== REPLACEMENT ===---')
       original_block = content_parts[0].strip("\n\r")
       replacement_block = content_parts[1].strip("\n\r")
@@ -695,21 +903,12 @@ def apply_patch(solution_file_path: str, **kwargs) -> dict:
       with open(file_path, 'r', encoding='utf-8') as f:
         file_content = f.read()
 
-      if replacement_block in file_content:
-        applied_count += 1
-        continue
-
-      norm_repl = re.sub(r'\s+', ' ', replacement_block).strip()
-      norm_file = re.sub(r'\s+', ' ', file_content).strip()
-      if norm_repl in norm_file:
-        applied_count += 1
-        continue
-
       if original_block in file_content:
         new_content = file_content.replace(original_block, replacement_block, 1)
         with open(file_path, 'w', encoding='utf-8') as f:
           f.write(new_content)
         applied_count += 1
+        APPLIED_PATCH_TARGETS.add(normalized_target)
         continue
 
       norm_orig = re.sub(r'\s+', ' ', original_block).strip()
@@ -729,6 +928,7 @@ def apply_patch(solution_file_path: str, **kwargs) -> dict:
           with open(file_path, 'w', encoding='utf-8') as f:
             f.write("\n".join(new_lines))
           applied_count += 1
+          APPLIED_PATCH_TARGETS.add(normalized_target)
           continue
 
       lines = file_content.splitlines()
@@ -923,11 +1123,9 @@ def commit_workspace_snapshots(project_source_path: str,
     Create synchronized Git snapshot commits for both upstream and downstream repositories.
     Each workspace always receives a new commit SHA via `git add . && git commit --allow-empty -m ...`.
     """
-  basic_info = extract_basic_information(_LATEST_BASIC_INFORMATION)
-  project_source_path, project_config_path, downstream_repo_path = _coerce_project_paths_with_basic_information(
-      project_source_path, project_config_path, basic_info)
-
-  downstream_repo_path = downstream_repo_path or project_config_path
+  # The caller supplies the already verified workspaces. Do not replace
+  # them with process-global session state from another project.
+  downstream_repo_path = project_config_path
   if downstream_repo_path and not os.path.exists(
       os.path.join(downstream_repo_path, ".git")):
     candidate_root = os.path.abspath(
@@ -991,32 +1189,60 @@ def run_fuzz_build_and_validate(project_name: str,
     Success Criteria: Step 2 (check_build) must PASS. All other steps are reference items.
     """
 
-  import os
-  import re  # 用于进度正则匹配
-  import select  # 用于非阻塞读取
-  import signal
   import stat
   import subprocess
-  import sys
   import time
+  import os
+  import sys
+  import signal
+  import select  # 用于非阻塞读取
+  import re  # 用于进度正则匹配
 
   raw_basic_information = None
+  phase_error = _reject_if_project_phase_stopped("validation")
+  if phase_error:
+    return phase_error
+  if _ACTIVE_PROJECT_NAME and project_name != _ACTIVE_PROJECT_NAME:
+    message = (f"Rejected cross-project validation: active project is "
+               f"{_ACTIVE_PROJECT_NAME}, requested project is {project_name}.")
+    print(f"[STATE ISOLATION] {message}")
+    return {
+        "status": "error",
+        "message": message,
+        "validation_report": {
+            "step_1_official_list": "pending",
+            "step_2_infra_compliance": "pending",
+            "step_3_sanitizer_injected": "pending",
+            "step_4_engine_control": "pending",
+            "step_5_logic_linkage": "pending",
+            "step_6_runtime_stability": "pending",
+        },
+    }
   if tool_context and getattr(tool_context, "session", None):
     raw_basic_information = tool_context.session.state.get("basic_information")
   basic_info = extract_basic_information(raw_basic_information or
                                          _LATEST_BASIC_INFORMATION)
-
-  project_name = basic_info.get("project_name") or project_name
-  sanitizer = basic_info.get("sanitizer") or sanitizer
-  engine = basic_info.get("engine") or engine
-  architecture = basic_info.get("architecture") or architecture
-  if basic_info.get("project_source_path"):
+  requested_project_name = project_name
+  state_project_name = basic_info.get("project_name")
+  if state_project_name and requested_project_name and state_project_name != requested_project_name:
+    print(
+        f"[STATE ISOLATION] Ignoring stale basic_information for project "
+        f"{state_project_name}; requested project is {requested_project_name}.")
+    basic_info = {}
+  # Explicit validation arguments are authoritative.  State can only fill
+  # an omitted value, never redirect a build to another project's workspace.
+  project_name = requested_project_name or basic_info.get("project_name")
+  sanitizer = sanitizer or basic_info.get("sanitizer")
+  engine = engine or basic_info.get("engine")
+  architecture = architecture or basic_info.get("architecture")
+  if not mount_path and basic_info.get("project_source_path"):
     mount_path = basic_info.get("project_source_path")
-  if basic_info.get("project_config_repo_path"):
-    oss_fuzz_path = basic_info.get("project_config_repo_path")
-  elif basic_info.get("project_config_path"):
-    oss_fuzz_path = os.path.abspath(
-        os.path.join(basic_info.get("project_config_path"), "..", ".."))
+  if not oss_fuzz_path:
+    if basic_info.get("project_config_repo_path"):
+      oss_fuzz_path = basic_info.get("project_config_repo_path")
+    elif basic_info.get("project_config_path"):
+      oss_fuzz_path = os.path.abspath(
+          os.path.join(basic_info.get("project_config_path"), "..", ".."))
 
   print("[DEBUG run_fuzz_build_and_validate args] "
         f"project_name={project_name} | "
@@ -1734,9 +1960,9 @@ def execute_hsr_decision(tool_context: ToolContext) -> dict:
     Compares SA >= SB dominance on the state tuple S = <L, V> to decide rollback action.
     Synchronizes double-workspace Git repositories with exact physical SHA targets on Rollback.
     """
-  import logging
-  import shutil
   import subprocess
+  import shutil
+  import logging
 
   logger = logging.getLogger(__name__)
   session = tool_context.session
@@ -2348,9 +2574,7 @@ def extract_buggy_line_info(log_path: str,
         project_source_path: (New) Root path of the source code for path validation.
         error_date: (New) Date string for fallback time-window search.
     """
-  import os
-  import re
-  import subprocess
+  import os, re, subprocess
   if not os.path.exists(log_path):
     return {"status": "error", "message": "Log file not found."}
 
@@ -2509,8 +2733,7 @@ def get_enhanced_history_context(project_source_path: str,
         line_num: (Legacy/Deprecated) Used if clue_data is missing.
         sha: (Legacy/Deprecated) Used if clue_data is missing.
     """
-  import os
-  import subprocess
+  import os, subprocess
   from datetime import datetime, timedelta
 
   if not os.path.isdir(os.path.join(project_source_path, ".git")):
@@ -2736,9 +2959,8 @@ def download_remote_log(log_url: str, project_name: str,
     """
   import os
   import sys
-  from datetime import datetime
-
   import requests
+  from datetime import datetime
 
   print(f"--- Tool: download_remote_log called for URL: {log_url} ---")
 
@@ -2827,8 +3049,8 @@ def update_reflection_journal(project_name: str,
   """
     Explicitly record Attempt and Round IDs, store concise problem descriptions, and extract recent lessons for the state.
     """
-  import json
   import os
+  import json
   from datetime import datetime
 
   if not os.environ.get("ENABLE_REFLECTION", "True") == "True":
@@ -3299,11 +3521,10 @@ def update_yaml_report(file_path: str,
     统一的 YAML 更新工具：支持可选的根因回写与最终状态更新，具备原子写入能力。
     """
   import os
+  import yaml
   import tempfile
   from collections import OrderedDict
   from datetime import datetime
-
-  import yaml
 
   try:
     if not os.path.exists(file_path):
@@ -3525,12 +3746,10 @@ def read_projects_from_yaml(file_path: str) -> dict:
     """
   import os
   import re
-  from datetime import datetime
-
   import yaml
-
-  from utils.error_handler import format_path_error
+  from datetime import datetime
   from utils.path_utils import normalize_patch_path, validate_patch_path
+  from utils.error_handler import format_path_error
 
   print(f"--- Tool: read_projects_from_yaml called for: {file_path} ---")
 
@@ -3899,16 +4118,72 @@ def truncate_prompt_file(file_path: str,
     return {"status": "error", "message": message}
 
 
+def _solution_patch_text(solution_path: str,
+                         workspace_root: str) -> Dict[str, Any]:
+  """Convert solver blocks into a standalone, patch-scoped unified diff."""
+  with open(solution_path, "r", encoding="utf-8") as handle:
+    content = handle.read()
+  files: Dict[str, List[str]] = {}
+  added = deleted = hunks = 0
+  for block in content.split("---=== FILE ===---")[1:]:
+    parts = block.split("---=== ORIGINAL ===---", 1)
+    if len(parts) != 2:
+      continue
+    target, rest = parts[0].strip(), parts[1]
+    parts = rest.split("---=== REPLACEMENT ===---", 1)
+    if len(parts) != 2:
+      continue
+    original = parts[0].strip("\n\r").splitlines()
+    replacement = parts[1].strip("\n\r").splitlines()
+    normalized = normalize_patch_path(target, workspace_root)
+    files.setdefault(normalized, [])
+    diff = list(
+        __import__("difflib").unified_diff(original,
+                                           replacement,
+                                           fromfile=f"a/{normalized}",
+                                           tofile=f"b/{normalized}",
+                                           lineterm=""))
+    if diff:
+      files[normalized].extend(
+          [f"diff --git a/{normalized} b/{normalized}", *diff])
+      added += sum(1 for line in diff[2:]
+                   if line.startswith("+") and not line.startswith("+++"))
+      deleted += sum(1 for line in diff[2:]
+                     if line.startswith("-") and not line.startswith("---"))
+      hunks += sum(1 for line in diff if line.startswith("@@"))
+  text = "\n".join(line for lines in files.values() for line in lines)
+  if text:
+    text += "\n"
+  return {
+      "text": text,
+      "files": len([v for v in files.values() if v]),
+      "added": added,
+      "deleted": deleted,
+      "hunks": hunks
+  }
+
+
+def get_solution_patch_metrics(snapshot: Dict[str, str]) -> Dict[str, int]:
+  """Return metrics for the exact final solver artifact, not repository HEAD."""
+  result = {"files": 0, "added": 0, "deleted": 0, "hunks": 0}
+  for path in (snapshot or {}).values():
+    if path.endswith("solution.txt") and os.path.exists(path):
+      result = _solution_patch_text(path, os.getcwd())
+      break
+  return {
+      key: int(result.get(key, 0))
+      for key in ("files", "added", "deleted", "hunks")
+  }
+
+
 def archive_fixed_project(project_name: str,
                           project_config_path: str,
                           is_success: bool = True,
-                          project_source_path: str = None) -> dict:
-  import os
-  import shutil
-  import subprocess
+                          project_source_path: str = None,
+                          final_patch_snapshot: Dict[str, str] = None) -> dict:
+  import os, shutil, subprocess
   from datetime import datetime
-
-  from agent_tools import TraceLedgerManager
+  from agent_tools import TraceLedgerManager, APPLIED_PATCH_TARGETS
 
   print(
       f"--- Tool: archive_fixed_project called for: {project_name} (Success: {is_success}) ---"
@@ -3945,6 +4220,71 @@ def archive_fixed_project(project_name: str,
       print(
           f"  - Warning: result.txt not found at {result_txt_path}, skipping.")
 
+    # 3. Archive only the final verified solver artifact. Repository HEAD
+    # contains setup/history commits and is not the repair patch boundary.
+    if is_success and final_patch_snapshot and final_patch_snapshot.get(
+        "latest_source_sha"):
+      verified = get_verified_snapshot_patches(final_patch_snapshot)
+      # The Git snapshot is always the complete patch source.  An
+      # optional optimizer review may remove only explicitly identified
+      # non-repair files; it cannot add or rewrite patch content.
+      if "archive_source_patch" in final_patch_snapshot:
+        verified["source_patch"] = final_patch_snapshot["archive_source_patch"]
+      if "archive_config_patch" in final_patch_snapshot:
+        verified["config_patch"] = final_patch_snapshot["archive_config_patch"]
+      config_repo_path = project_config_path
+      with open(os.path.join(destination_dir, "diffs", "source_fix.patch"),
+                "w",
+                encoding="utf-8") as pf:
+        pf.write(verified["source_patch"])
+      with open(os.path.join(destination_dir, "diffs", "config_fix.patch"),
+                "w",
+                encoding="utf-8") as pf:
+        pf.write(verified["config_patch"])
+      print(
+          "  - Archived Git diff from original failure SHA to latest verified SHA."
+      )
+      for cleanup_path in (project_source_path, config_repo_path):
+        if cleanup_path and os.path.isdir(cleanup_path):
+          reclaim_path_permissions(cleanup_path)
+          shutil.rmtree(cleanup_path, ignore_errors=True)
+      return {"status": "success", "archive_dir": destination_dir}
+
+    if is_success and final_patch_snapshot and os.path.exists(
+        final_patch_snapshot.get("solution", "")):
+      parsed = _solution_patch_text(final_patch_snapshot["solution"],
+                                    os.getcwd())
+      grouped: Dict[str, List[str]] = {"source": [], "configs": []}
+      solution_text = parsed["text"]
+      for chunk in solution_text.split("diff --git ")[1:]:
+        first = chunk.splitlines()[0]
+        group = "source" if first.startswith(
+            "a/process/project/") else "configs"
+        archive_chunk = "diff --git " + chunk
+        if group == "source":
+          prefix = f"process/project/{project_name}/"
+          archive_chunk = archive_chunk.replace(f"a/{prefix}", "a/")
+          archive_chunk = archive_chunk.replace(f"b/{prefix}", "b/")
+        else:
+          archive_chunk = archive_chunk.replace("a/oss-fuzz/", "a/")
+          archive_chunk = archive_chunk.replace("b/oss-fuzz/", "b/")
+        grouped[group].append(archive_chunk)
+      for group, patch_name in (("configs", "config_fix.patch"),
+                                ("source", "source_fix.patch")):
+        with open(os.path.join(destination_dir, "diffs", patch_name),
+                  "w",
+                  encoding="utf-8") as pf:
+          pf.write("".join(grouped[group]))
+      print(
+          "  - Archived only the final verified solution artifact; cumulative repository diff excluded."
+      )
+      for cleanup_path in (project_source_path, config_repo_path):
+        if cleanup_path and os.path.isdir(cleanup_path):
+          reclaim_path_permissions(cleanup_path)
+          shutil.rmtree(cleanup_path, ignore_errors=True)
+      return {"status": "success", "archive_dir": destination_dir}
+
+    # 4. Legacy fallback for unsuccessful runs without a verified artifact.
     # 3. 统一提取变更 (Loop 结构)
     config_repo_path = project_config_path
     if config_repo_path and not os.path.exists(
@@ -3958,6 +4298,21 @@ def archive_fixed_project(project_name: str,
                 sha_map.get("oss-fuzz_sha")),
                (project_source_path, "source", "source_fix.patch",
                 sha_map.get("project_sha"))]
+
+    def _is_deliberate_target(relative_path: str, workspace_kind: str) -> bool:
+      """Keep only files declared by a physical solution patch."""
+      if is_build_generated_artifact(relative_path):
+        return False
+      if not APPLIED_PATCH_TARGETS:
+        return True
+      # Git reports paths relative to each repository root, while
+      # apply_patch records the complete workspace-relative target.
+      # Normalize the absolute Git path into the same namespace first.
+      workspace_root = os.getcwd()
+      repo_relative = os.path.relpath(path, workspace_root)
+      expected = normalize_patch_path(
+          os.path.join(repo_relative, relative_path), workspace_root)
+      return expected in APPLIED_PATCH_TARGETS
 
     for path, dest_sub, patch_name, baseline_sha in targets:
       if not path or not os.path.isdir(path):
@@ -3974,11 +4329,18 @@ def archive_fixed_project(project_name: str,
                                text=True,
                                check=True)
           changed_files = [
-              f.strip() for f in res.stdout.split('\n') if f.strip()
+              f.strip()
+              for f in res.stdout.split('\n')
+              if f.strip() and _is_deliberate_target(f.strip(), dest_sub)
           ]
         except Exception as e:
           print(f"  - Warning: Diff failed for {path}: {e}")
 
+      if changed_files:
+        changed_files = [
+            f_rel for f_rel in changed_files
+            if get_filtered_git_diff(path, baseline_sha, [f_rel])
+        ]
       if changed_files:
         if dest_sub != "source":
           for f_rel in changed_files:
@@ -3988,14 +4350,14 @@ def archive_fixed_project(project_name: str,
             shutil.copy2(src, dst)
         with open(os.path.join(destination_dir, "diffs", patch_name),
                   "w") as pf:
-          subprocess.run(["git", "-C", path, "diff", baseline_sha, "HEAD"],
-                         stdout=pf,
-                         check=True)
+          pf.write(get_filtered_git_diff(path, baseline_sha, changed_files))
       else:
-        if dest_sub != "source":
-          shutil.copytree(path,
-                          os.path.join(destination_dir, f"{dest_sub}_all"),
-                          dirs_exist_ok=True)
+        # Never archive an entire repository as a fallback.  An empty
+        # filtered diff is safer and keeps the archive patch-scoped.
+        open(os.path.join(destination_dir, "diffs", patch_name),
+             "w",
+             encoding="utf-8").close()
+        print(f"  - No declared {dest_sub} changes; wrote empty {patch_name}.")
 
     # 4. 强制物理清理
     def _safe_physical_remove(dir_path: str):
@@ -4029,12 +4391,22 @@ def download_github_repo(project_name: str,
     🔑 优化：强力强制重定向，将非 oss-fuzz 的第三方仓库牢牢锁定在 process/project/ 路径下。
     """
   import json
+  import time
+  import subprocess
   import os
   import shutil
-  import subprocess
-  import time
 
   current_work_dir = os.getcwd()
+
+  phase_error = _reject_if_project_phase_stopped("repository setup")
+  if phase_error:
+    return phase_error
+
+  if project_name != "oss-fuzz" and _ACTIVE_PROJECT_NAME and project_name != _ACTIVE_PROJECT_NAME:
+    message = (f"Rejected cross-project repository setup: active project is "
+               f"{_ACTIVE_PROJECT_NAME}, requested project is {project_name}.")
+    print(f"[STATE ISOLATION] {message}")
+    return {"status": "error", "message": message}
 
   # 🔑 1. 下游 oss-fuzz 与 上游开源项目路径强制路由锁
   if project_name == "oss-fuzz":
@@ -4353,7 +4725,11 @@ def save_file_tree_shallow(directory_path: str,
       if depth >= max_depth:
         return
       try:
-        entries = sorted([e for e in os.listdir(path) if not e.startswith('.')])
+        entries = sorted([
+            e for e in os.listdir(path)
+            if not e.startswith('.') and not is_build_generated_artifact(
+                os.path.relpath(os.path.join(path, e), directory_path))
+        ])
       except OSError:
         entries = []
 
@@ -4487,9 +4863,7 @@ def read_file_content(file_path: str,
     1. 集成新机制：路径规范化、白名单校验、物理缺失路径纠错引导。
     2. 集成旧系统：License 自动剥离、多模式切片、500行硬熔断阈值防止 Token 溢出。
     """
-  import os
-  import re
-
+  import os, re
   from utils.path_utils import DEFAULT_PROJECT_ROOT
 
   # 1. 路径解析基准对齐
@@ -4598,6 +4972,186 @@ def read_file_content(file_path: str,
     return {"status": "error", "message": f"Read operation failed: {str(e)}"}
 
 
+def _read_only_git_repo_path(repo_path: str) -> Optional[str]:
+  """Resolve and restrict a repository path for optimizer read-only queries."""
+  workspace_root = os.path.abspath(os.getcwd())
+  resolved = os.path.abspath(repo_path)
+  allowed_roots = (
+      os.path.join(workspace_root, "process", "project"),
+      os.path.join(workspace_root, "oss-fuzz"),
+  )
+  if not any(
+      os.path.commonpath([resolved, root]) == root for root in allowed_roots):
+    return None
+  if not os.path.exists(os.path.join(resolved, ".git")):
+    return None
+  return resolved
+
+
+def read_git_diff(repo_path: str,
+                  base_ref: str = "HEAD~1",
+                  target_ref: str = "HEAD",
+                  mode: str = "summary",
+                  pathspec: str = "",
+                  offset: int = 0,
+                  max_lines: int = 40,
+                  context_lines: int = 3) -> dict:
+  """Read Git diff evidence incrementally without changing repository state.
+
+    ``summary`` is the safe default. ``excerpt`` reads a bounded line window,
+    and ``full`` is allowed only for an explicit pathspec and still returns a
+    bounded window so generated binaries cannot fill the model context.
+    """
+  resolved = _read_only_git_repo_path(repo_path)
+  if not resolved:
+    return {
+        "status":
+            "error",
+        "message":
+            "Repository is outside the read-only project whitelist or has no .git directory."
+    }
+  try:
+    if mode not in {"summary", "excerpt", "full"}:
+      return {
+          "status": "error",
+          "message": "mode must be summary, excerpt, or full."
+      }
+    if offset < 0 or max_lines < 1 or max_lines > 200:
+      return {
+          "status": "error",
+          "message": "offset must be non-negative and max_lines must be 1..200."
+      }
+    if mode == "full" and not pathspec:
+      return {
+          "status": "error",
+          "message": "Full diff requires an explicit file pathspec."
+      }
+    if pathspec and is_build_generated_artifact(pathspec):
+      return {
+          "status":
+              "error",
+          "message":
+              "Build-generated artifacts are excluded from repair evidence."
+      }
+
+    command = ["git", "-C", resolved, "diff", "--no-ext-diff"]
+    if mode == "summary":
+      command.extend(["--stat", "--summary", "--numstat"])
+    else:
+      command.extend([f"--unified={context_lines}"])
+    command.extend([base_ref, target_ref])
+    if pathspec:
+      command.extend(["--", pathspec])
+    else:
+      command.extend([
+          "--",
+          ".",
+          ":(exclude)main.*.go",
+          ":(exclude)*_fuzz.go",
+          ":(exclude)*.orig",
+          ":(exclude)go.sum",
+          ":(exclude)fuzz*.a",
+          ":(exclude)fuzz*.h",
+          ":(exclude)*.o",
+          ":(exclude)*.dSYM",
+          ":(exclude)**/main.*.go",
+          ":(exclude)**/*_fuzz.go",
+          ":(exclude)**/*.orig",
+          ":(exclude)**/go.sum",
+          ":(exclude)**/fuzz*.a",
+          ":(exclude)**/fuzz*.h",
+          ":(exclude)**/*.o",
+          ":(exclude)**/*.dSYM",
+      ])
+    result = subprocess.run(command,
+                            capture_output=True,
+                            text=True,
+                            check=False)
+    if result.returncode != 0:
+      return {
+          "status": "error",
+          "message": result.stderr.strip() or "git diff failed."
+      }
+    lines = result.stdout.splitlines()
+    if mode == "summary":
+      content = result.stdout
+      truncated = False
+      next_offset = None
+    else:
+      selected = lines[offset:offset + max_lines]
+      content = "\n".join(selected)
+      if selected:
+        content += "\n"
+      truncated = offset + len(selected) < len(lines)
+      next_offset = offset + len(selected) if truncated else None
+    return {
+        "status": "success",
+        "repo_path": resolved,
+        "base_ref": base_ref,
+        "target_ref": target_ref,
+        "mode": mode,
+        "pathspec": pathspec,
+        "offset": offset,
+        "max_lines": max_lines,
+        "content": content,
+        "truncated": truncated,
+        "next_offset": next_offset,
+    }
+  except Exception as exc:
+    return {"status": "error", "message": f"Read-only git diff failed: {exc}"}
+
+
+def read_git_changed_files(repo_path: str,
+                           base_ref: str = "HEAD~1",
+                           target_ref: str = "HEAD") -> dict:
+  """Read the exact changed-file list for a Git range without mutating it."""
+  resolved = _read_only_git_repo_path(repo_path)
+  if not resolved:
+    return {
+        "status":
+            "error",
+        "message":
+            "Repository is outside the read-only project whitelist or has no .git directory."
+    }
+  try:
+    result = subprocess.run([
+        "git", "-C", resolved, "diff", "--name-only", "--diff-filter=ACMRT",
+        base_ref, target_ref, "--", ".", ":(exclude)main.*.go",
+        ":(exclude)*_fuzz.go", ":(exclude)*.orig", ":(exclude)go.sum",
+        ":(exclude)fuzz*.a", ":(exclude)fuzz*.h", ":(exclude)*.o",
+        ":(exclude)*.dSYM", ":(exclude)**/main.*.go", ":(exclude)**/*_fuzz.go",
+        ":(exclude)**/*.orig", ":(exclude)**/go.sum", ":(exclude)**/fuzz*.a",
+        ":(exclude)**/fuzz*.h", ":(exclude)**/*.o", ":(exclude)**/*.dSYM"
+    ],
+                            capture_output=True,
+                            text=True,
+                            check=False)
+    if result.returncode != 0:
+      return {
+          "status": "error",
+          "message": result.stderr.strip() or "git changed-file query failed."
+      }
+    files = [
+        line.strip()
+        for line in result.stdout.splitlines()
+        if line.strip() and not is_build_generated_artifact(line.strip())
+    ]
+    entries = [{"path": path} for path in files]
+    return {
+        "status": "success",
+        "repo_path": resolved,
+        "base_ref": base_ref,
+        "target_ref": target_ref,
+        "files": files,
+        "entries": entries,
+    }
+  except Exception as exc:
+    return {
+        "status": "error",
+        "message": f"Read-only git file query failed: {exc}"
+    }
+
+
 @_safe_path_wrapper(operation_name="create_or_update_file")
 def create_or_update_file(file_path: str, content: str, **kwargs) -> dict:
   """
@@ -4642,8 +5196,8 @@ def append_file_to_file(source_path: str,
     Reads the entire content of a source file and appends it to the end of a destination file.
     Optimized: Path normalization + whitelist validation for both paths.
     """
-  from utils.error_handler import format_path_error
   from utils.path_utils import normalize_patch_path, validate_patch_path
+  from utils.error_handler import format_path_error
 
   print(
       f"--- Tool: append_file_to_file called. Source: '{source_path}', Destination: '{destination_path}' ---"
@@ -4737,8 +5291,8 @@ def append_string_to_file(file_path: str,
     Appends a string of content to the end of a specified file.
     Optimized: Path normalization + whitelist validation.
     """
-  from utils.error_handler import format_path_error
   from utils.path_utils import normalize_patch_path, validate_patch_path
+  from utils.error_handler import format_path_error
 
   print(f"--- Tool: append_string_to_file called for path: {file_path} ---")
 
@@ -4821,8 +5375,7 @@ def prompt_generate_tool(tool_context: ToolContext,
   """
     物理组装工具：从账本、归因工件和RAG库中提取信息并生成最终的 prompt.txt。
     """
-  import os
-  import re
+  import os, re
 
   print(
       f"--- Workflow Tool: prompt_generate_tool started (Attempt: {attempt_id}) ---"
@@ -5005,8 +5558,8 @@ def _cleanup_environment(oss_fuzz_path: str, project_name: str):
   """
     全方位立体强杀：从项目镜像、Runner镜像、物理挂载卷三个维度彻底解除锁定。
     """
-  import os
   import subprocess
+  import os
 
   # 获取需要排查的宿主机物理挂载路径
   host_out_dir = os.path.join(oss_fuzz_path, "build", "out", project_name)
@@ -5181,6 +5734,9 @@ def list_files_in_dir(dir_path: str,
       full_path = os.path.join(current, entry)
       rel_path = os.path.relpath(full_path, normalized_dir)
 
+      if is_build_generated_artifact(rel_path):
+        continue
+
       if fnmatch.fnmatch(entry, pattern) or fnmatch.fnmatch(
           rel_path, f"*{pattern}*"):
         is_dir = os.path.isdir(full_path) and not os.path.islink(
@@ -5207,7 +5763,6 @@ def check_file_exists(file_path: str) -> dict:
     Replaces unsafe 'ls ... 2>/dev/null' shell commands with structured JSON response.
     """
   import os
-
   # 1. 路径安全规范化（防穿越）
   workspace_root = os.getcwd()
   target = os.path.normpath(
@@ -5361,7 +5916,6 @@ def git_revert_counterfactual(repo_path: str, target_commit: str,
     修复安全缺陷：引入显式回滚异常拦截和基于 HEAD hash 的无损现场重置，杜绝抹除正常历史提交的隐患。
     """
   import subprocess
-
   # 1. 显式读取并保存当前的 HEAD 哈希，避免使用不确定的 HEAD~1
   orig_head = subprocess.run(["git", "-C", repo_path, "rev-parse", "HEAD"],
                              capture_output=True,
