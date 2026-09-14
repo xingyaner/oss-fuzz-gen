@@ -12,23 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import fnmatch
+import json
+import logging
 import os
 import re
 import subprocess
-
-import litellm
-import json
-import yaml
-import openpyxl
 import tempfile
-import fnmatch
-import logging
 import textwrap
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple, Callable, Optional, Set, Any
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+
+import litellm
+import openpyxl
+import yaml
 from google.adk.tools.tool_context import ToolContext
-from utils.path_utils import normalize_patch_path, validate_patch_path
+
 from utils.error_handler import format_path_error
+from utils.path_utils import normalize_patch_path, validate_patch_path
 
 logger = logging.getLogger(__name__)
 
@@ -684,6 +685,7 @@ def _safe_path_wrapper(*d_args, **d_kwargs):
   import functools
   import os
   from typing import Callable
+
   from google.adk.tools.tool_context import ToolContext
 
   # 1. 编译期解析有参传入的操作名称（兼容位置/关键字参数）
@@ -739,8 +741,8 @@ def _safe_path_wrapper(*d_args, **d_kwargs):
       strict_mode = kwargs.get('strict_mode', True)
 
       # 导入白名单验证逻辑与标准路径错误引导
-      from utils.path_utils import normalize_patch_path, validate_patch_path
       from utils.error_handler import format_path_error
+      from utils.path_utils import normalize_patch_path, validate_patch_path
 
       normalized = normalize_patch_path(path_arg, base_dir)
       if strict_mode and not validate_patch_path(normalized, strict=True):
@@ -1189,14 +1191,14 @@ def run_fuzz_build_and_validate(project_name: str,
     Success Criteria: Step 2 (check_build) must PASS. All other steps are reference items.
     """
 
+  import os
+  import re  # 用于进度正则匹配
+  import select  # 用于非阻塞读取
+  import signal
   import stat
   import subprocess
-  import time
-  import os
   import sys
-  import signal
-  import select  # 用于非阻塞读取
-  import re  # 用于进度正则匹配
+  import time
 
   raw_basic_information = None
   phase_error = _reject_if_project_phase_stopped("validation")
@@ -1960,9 +1962,9 @@ def execute_hsr_decision(tool_context: ToolContext) -> dict:
     Compares SA >= SB dominance on the state tuple S = <L, V> to decide rollback action.
     Synchronizes double-workspace Git repositories with exact physical SHA targets on Rollback.
     """
-  import subprocess
-  import shutil
   import logging
+  import shutil
+  import subprocess
 
   logger = logging.getLogger(__name__)
   session = tool_context.session
@@ -2574,7 +2576,9 @@ def extract_buggy_line_info(log_path: str,
         project_source_path: (New) Root path of the source code for path validation.
         error_date: (New) Date string for fallback time-window search.
     """
-  import os, re, subprocess
+  import os
+  import re
+  import subprocess
   if not os.path.exists(log_path):
     return {"status": "error", "message": "Log file not found."}
 
@@ -2733,7 +2737,8 @@ def get_enhanced_history_context(project_source_path: str,
         line_num: (Legacy/Deprecated) Used if clue_data is missing.
         sha: (Legacy/Deprecated) Used if clue_data is missing.
     """
-  import os, subprocess
+  import os
+  import subprocess
   from datetime import datetime, timedelta
 
   if not os.path.isdir(os.path.join(project_source_path, ".git")):
@@ -2959,8 +2964,9 @@ def download_remote_log(log_url: str, project_name: str,
     """
   import os
   import sys
-  import requests
   from datetime import datetime
+
+  import requests
 
   print(f"--- Tool: download_remote_log called for URL: {log_url} ---")
 
@@ -3049,8 +3055,8 @@ def update_reflection_journal(project_name: str,
   """
     Explicitly record Attempt and Round IDs, store concise problem descriptions, and extract recent lessons for the state.
     """
-  import os
   import json
+  import os
   from datetime import datetime
 
   if not os.environ.get("ENABLE_REFLECTION", "True") == "True":
@@ -3521,10 +3527,11 @@ def update_yaml_report(file_path: str,
     统一的 YAML 更新工具：支持可选的根因回写与最终状态更新，具备原子写入能力。
     """
   import os
-  import yaml
   import tempfile
   from collections import OrderedDict
   from datetime import datetime
+
+  import yaml
 
   try:
     if not os.path.exists(file_path):
@@ -3746,10 +3753,12 @@ def read_projects_from_yaml(file_path: str) -> dict:
     """
   import os
   import re
-  import yaml
   from datetime import datetime
-  from utils.path_utils import normalize_patch_path, validate_patch_path
+
+  import yaml
+
   from utils.error_handler import format_path_error
+  from utils.path_utils import normalize_patch_path, validate_patch_path
 
   print(f"--- Tool: read_projects_from_yaml called for: {file_path} ---")
 
@@ -4181,9 +4190,12 @@ def archive_fixed_project(project_name: str,
                           is_success: bool = True,
                           project_source_path: str = None,
                           final_patch_snapshot: Dict[str, str] = None) -> dict:
-  import os, shutil, subprocess
+  import os
+  import shutil
+  import subprocess
   from datetime import datetime
-  from agent_tools import TraceLedgerManager, APPLIED_PATCH_TARGETS
+
+  from agent_tools import APPLIED_PATCH_TARGETS, TraceLedgerManager
 
   print(
       f"--- Tool: archive_fixed_project called for: {project_name} (Success: {is_success}) ---"
@@ -4391,10 +4403,10 @@ def download_github_repo(project_name: str,
     🔑 优化：强力强制重定向，将非 oss-fuzz 的第三方仓库牢牢锁定在 process/project/ 路径下。
     """
   import json
-  import time
-  import subprocess
   import os
   import shutil
+  import subprocess
+  import time
 
   current_work_dir = os.getcwd()
 
@@ -4863,7 +4875,9 @@ def read_file_content(file_path: str,
     1. 集成新机制：路径规范化、白名单校验、物理缺失路径纠错引导。
     2. 集成旧系统：License 自动剥离、多模式切片、500行硬熔断阈值防止 Token 溢出。
     """
-  import os, re
+  import os
+  import re
+
   from utils.path_utils import DEFAULT_PROJECT_ROOT
 
   # 1. 路径解析基准对齐
@@ -5196,8 +5210,8 @@ def append_file_to_file(source_path: str,
     Reads the entire content of a source file and appends it to the end of a destination file.
     Optimized: Path normalization + whitelist validation for both paths.
     """
-  from utils.path_utils import normalize_patch_path, validate_patch_path
   from utils.error_handler import format_path_error
+  from utils.path_utils import normalize_patch_path, validate_patch_path
 
   print(
       f"--- Tool: append_file_to_file called. Source: '{source_path}', Destination: '{destination_path}' ---"
@@ -5291,8 +5305,8 @@ def append_string_to_file(file_path: str,
     Appends a string of content to the end of a specified file.
     Optimized: Path normalization + whitelist validation.
     """
-  from utils.path_utils import normalize_patch_path, validate_patch_path
   from utils.error_handler import format_path_error
+  from utils.path_utils import normalize_patch_path, validate_patch_path
 
   print(f"--- Tool: append_string_to_file called for path: {file_path} ---")
 
@@ -5375,7 +5389,8 @@ def prompt_generate_tool(tool_context: ToolContext,
   """
     物理组装工具：从账本、归因工件和RAG库中提取信息并生成最终的 prompt.txt。
     """
-  import os, re
+  import os
+  import re
 
   print(
       f"--- Workflow Tool: prompt_generate_tool started (Attempt: {attempt_id}) ---"
@@ -5558,8 +5573,8 @@ def _cleanup_environment(oss_fuzz_path: str, project_name: str):
   """
     全方位立体强杀：从项目镜像、Runner镜像、物理挂载卷三个维度彻底解除锁定。
     """
-  import subprocess
   import os
+  import subprocess
 
   # 获取需要排查的宿主机物理挂载路径
   host_out_dir = os.path.join(oss_fuzz_path, "build", "out", project_name)
@@ -5763,6 +5778,7 @@ def check_file_exists(file_path: str) -> dict:
     Replaces unsafe 'ls ... 2>/dev/null' shell commands with structured JSON response.
     """
   import os
+
   # 1. 路径安全规范化（防穿越）
   workspace_root = os.getcwd()
   target = os.path.normpath(
@@ -5916,6 +5932,7 @@ def git_revert_counterfactual(repo_path: str, target_commit: str,
     修复安全缺陷：引入显式回滚异常拦截和基于 HEAD hash 的无损现场重置，杜绝抹除正常历史提交的隐患。
     """
   import subprocess
+
   # 1. 显式读取并保存当前的 HEAD 哈希，避免使用不确定的 HEAD~1
   orig_head = subprocess.run(["git", "-C", repo_path, "rev-parse", "HEAD"],
                              capture_output=True,
