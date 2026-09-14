@@ -26,7 +26,7 @@ import tempfile
 import time
 import traceback
 import warnings
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 import agent_tools
@@ -473,6 +473,73 @@ ENABLE_PATCH_OPTIMIZATION = False
 PATCH_OPTIMIZATION_MAX_ITERATIONS = 3
 PROJECT_LIMIT = 0
 _OPTIMIZATION_RECOVERY_BASELINE = None
+LLM_API_EVENTS_PATH = os.getenv('FIX_BUILD_AGENT_LLM_EVENTS_PATH', '')
+
+
+def _write_llm_api_event(event: dict[str, Any]) -> None:
+  """Appends non-sensitive LLM request evidence when configured."""
+  if not LLM_API_EVENTS_PATH:
+    return
+  try:
+    event['timestamp_utc'] = datetime.now(timezone.utc).isoformat()
+    with open(LLM_API_EVENTS_PATH, 'a', encoding='utf-8') as event_file:
+      event_file.write(json.dumps(event, sort_keys=True) + '\n')
+  except OSError as error:
+    print(f'--- [OBSERVABILITY] Failed to write LLM API event: {error} ---')
+
+
+def _record_llm_usage_event(event: Event, project_name: str,
+                            attempt_id: int) -> None:
+  """Records token metadata from an LLM response without its content."""
+  usage = getattr(event, 'usage_metadata', None)
+  if not usage:
+    return
+  _write_llm_api_event({
+      'event_type':
+          'response',
+      'project':
+          project_name,
+      'attempt':
+          attempt_id,
+      'agent':
+          getattr(event, 'author', ''),
+      'model':
+          MODEL,
+      'vertex_location':
+          os.getenv('VERTEXAI_LOCATION', os.getenv('GOOGLE_CLOUD_LOCATION',
+                                                   '')),
+      'prompt_tokens':
+          getattr(usage, 'prompt_token_count', 0) or 0,
+      'output_tokens':
+          getattr(usage, 'candidates_token_count', 0) or 0,
+  })
+
+
+def _record_llm_error_event(error: Exception, project_name: str,
+                            attempt_id: int) -> None:
+  """Records a sanitized LLM failure for quota and retry diagnosis."""
+  message = str(error)
+  status_match = re.search(r'\b([45]\d\d)\b', message)
+  service_status_match = re.search(r'"status":\s*"([A-Z_]+)"', message)
+  _write_llm_api_event({
+      'event_type':
+          'error',
+      'project':
+          project_name,
+      'attempt':
+          attempt_id,
+      'model':
+          MODEL,
+      'vertex_location':
+          os.getenv('VERTEXAI_LOCATION', os.getenv('GOOGLE_CLOUD_LOCATION',
+                                                   '')),
+      'error_type':
+          type(error).__name__,
+      'http_status':
+          int(status_match.group(1)) if status_match else None,
+      'service_status':
+          service_status_match.group(1) if service_status_match else '',
+  })
 
 
 def _model_uses_vertex_adc(model_name: str) -> bool:
@@ -1899,6 +1966,7 @@ async def process_single_project(
           processed_event_ids.add(dedup_key)
 
           GLOBAL_LOGGER.log_event(event)
+          _record_llm_usage_event(event, project_name, current_attempt_id)
 
           if event.author in {
               'run_fuzz_and_collect_log_agent', 'decision_agent', 'rsmc_agent',
@@ -2329,6 +2397,7 @@ async def process_single_project(
         continue
 
       except Exception as e:
+        _record_llm_error_event(e, project_name, current_attempt_id)
         err_tb = traceback.format_exc()
         print(
             f"\n--- ❌ [CRASH DETECTED] Attempt {current_attempt_id} failed: {str(e)} ---"

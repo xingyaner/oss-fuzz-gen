@@ -970,13 +970,15 @@ class ExternalBuildFixAgent(BaseAgent):
 
   # pylint: disable=unused-argument
   def _copy_external_artifacts(self, external_path: str, log_path: str,
-                               log_text: str) -> None:
+                               log_text: str, invocation: dict[str,
+                                                               Any]) -> None:
     """Copies the external agent's own outputs into oss-fuzz-gen results."""
     archive_dir = self._external_archive_dir()
     for stale_name in [
         'agent.log', 'agent.stdout.txt', 'agent_logs', 'archive',
         'process_fixed', 'process_unfixed', 'project_repair_trace.json',
-        'projects.yaml', 'fixed-files'
+        'projects.yaml', 'fixed-files', 'invocation.json',
+        'llm-api-events.jsonl'
     ]:
       stale_path = os.path.join(archive_dir, stale_name)
       if os.path.isdir(stale_path):
@@ -985,6 +987,16 @@ class ExternalBuildFixAgent(BaseAgent):
         os.remove(stale_path)
 
     shutil.copy2(log_path, os.path.join(archive_dir, 'run.log'))
+    with open(os.path.join(archive_dir, 'invocation.json'),
+              'w',
+              encoding='utf-8') as invocation_file:
+      json.dump(invocation, invocation_file, indent=2, sort_keys=True)
+      invocation_file.write('\n')
+
+    event_path = os.path.join(external_path, 'llm-api-events.jsonl')
+    if os.path.exists(event_path):
+      shutil.copy2(event_path, os.path.join(archive_dir,
+                                            'llm-api-events.jsonl'))
 
     external_yaml = os.path.join(external_path, 'projects.yaml')
     if os.path.exists(external_yaml):
@@ -1129,6 +1141,25 @@ class ExternalBuildFixAgent(BaseAgent):
                          chat_history={self.name: message})
 
     external_yaml = self._write_external_projects_yaml(external_path)
+    invocation = {
+        'project':
+            self.benchmark.project,
+        'trial':
+            self.trial,
+        'model':
+            '',
+        'api_base':
+            '',
+        'command': [],
+        'optimize_patch':
+            bool(self.args.fix_build_optimize_patch),
+        'optimization_max_iterations':
+            self.args.fix_build_optimization_max_iterations,
+        'agent_exit_code':
+            None,
+        'status':
+            'starting',
+    }
     with tempfile.NamedTemporaryFile(mode='w+', encoding='utf-8',
                                      delete=False) as log_file:
       log_path = log_file.name
@@ -1136,6 +1167,10 @@ class ExternalBuildFixAgent(BaseAgent):
     try:
       external_env = self._external_env()
       external_python = self._external_python(external_path)
+      llm_event_path = os.path.join(external_path, 'llm-api-events.jsonl')
+      if os.path.exists(llm_event_path):
+        os.remove(llm_event_path)
+      external_env['FIX_BUILD_AGENT_LLM_EVENTS_PATH'] = llm_event_path
       logging.info('External fix-build Python: %s (exists=%s)', external_python,
                    os.path.exists(external_python))
       command = [
@@ -1148,6 +1183,12 @@ class ExternalBuildFixAgent(BaseAgent):
             '--optimize-patch', '--optimization-max-iterations',
             str(self.args.fix_build_optimization_max_iterations)
         ])
+      invocation.update({
+          'model': external_env['FIX_BUILD_AGENT_MODEL'],
+          'api_base': external_env['FIX_BUILD_AGENT_API_BASE'],
+          'command': command,
+          'status': 'running',
+      })
       logging.info('External fix-build command: %s', command)
       logging.info('External projects YAML: %s (exists=%s)', external_yaml,
                    os.path.exists(external_yaml))
@@ -1161,6 +1202,8 @@ class ExternalBuildFixAgent(BaseAgent):
                                errors='ignore',
                                check=False)
       log_text = process.stdout
+      invocation['agent_exit_code'] = process.returncode
+      invocation['status'] = 'completed'
       logging.info('External fix-build process return code: %s',
                    process.returncode)
       with open(log_path, 'w') as f:
@@ -1168,8 +1211,11 @@ class ExternalBuildFixAgent(BaseAgent):
     except Exception as exc:  # pylint: disable=broad-exception-caught
       log_text = f'Failed to run external fix build agent: {exc}'
       process = subprocess.CompletedProcess([], 1, log_text, '')
+      invocation['agent_exit_code'] = process.returncode
+      invocation['status'] = 'launcher_error'
+      invocation['launcher_error_type'] = type(exc).__name__
 
-    self._copy_external_artifacts(external_path, log_path, log_text)
+    self._copy_external_artifacts(external_path, log_path, log_text, invocation)
     result_success = self._read_external_result_success()
     success = bool(result_success)
     if result_success is None:
