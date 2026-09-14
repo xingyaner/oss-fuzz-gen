@@ -1143,6 +1143,11 @@ class ExternalBuildFixAgent(BaseAgent):
           '--model', external_env['FIX_BUILD_AGENT_MODEL'], '--api-base',
           external_env['FIX_BUILD_AGENT_API_BASE'], '--skip-gh-auth-check'
       ]
+      if self.args.fix_build_optimize_patch:
+        command.extend([
+            '--optimize-patch', '--optimization-max-iterations',
+            str(self.args.fix_build_optimization_max_iterations)
+        ])
       logging.info('External fix-build command: %s', command)
       logging.info('External projects YAML: %s (exists=%s)', external_yaml,
                    os.path.exists(external_yaml))

@@ -297,6 +297,18 @@ def parse_args() -> argparse.Namespace:
       help=('Path to a fix_build_agent checkout. This is optional when '
             '--full-fix-build-agent is used because oss-fuzz-gen includes a '
             'bundled fix_build_agent directory.'))
+  parser.add_argument(
+      '--fix-build-optimize-patch',
+      action='store_true',
+      default=False,
+      help=('Runs the optional post-success patch optimizer in the full '
+            'fix-build-agent workflow.'))
+  parser.add_argument(
+      '--fix-build-optimization-max-iterations',
+      type=int,
+      default=3,
+      help=('Maximum accepted patch-optimization iterations for each '
+            'successfully repaired project.'))
   parser.add_argument('--custom-pipeline', type=str, default='')
   parser.add_argument('-mr',
                       '--max-round',
@@ -324,6 +336,13 @@ def parse_args() -> argparse.Namespace:
         '--full-fix-build-agent requires --fix-build-agent.')
     if not args.external_fix_build_agent_path:
       args.external_fix_build_agent_path = BUNDLED_FIX_BUILD_AGENT_DIR
+
+  if args.fix_build_optimize_patch:
+    assert args.fix_build_agent and args.full_fix_build_agent, (
+        '--fix-build-optimize-patch requires --fix-build-agent and '
+        '--full-fix-build-agent.')
+  assert args.fix_build_optimization_max_iterations >= 1, (
+      '--fix-build-optimization-max-iterations must be at least 1.')
 
   if args.external_fix_build_agent_path:
     assert args.fix_build_agent, (
