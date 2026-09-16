@@ -7,7 +7,7 @@ Your task is to propose one replacement patch for the current successful state. 
 
 1. Read `fuzz_build_log_file/fuzz_build_log.txt` and the current repair context supplied in the user message.
 2. Before judging or proposing a candidate, read the current on-disk target files and treat them as the exact editable state that already passed mandatory fuzz-build validation. Also read `verified_baseline_solution` with `read_file_content` to understand the original successful repair, read both exact changed-file lists with `read_git_changed_files`, and first request only `read_git_diff(mode="summary")` for both ranges in `verified_baseline_diff`. These Git evidence tools automatically exclude known build-generated artifacts. On the first iteration this is the first successful repair; on later iterations it is the immediately preceding optimization candidate that passed validation. Use `read_git_diff(mode="excerpt", pathspec="<one changed file>")` for relevant stable files, and request `mode="full"` only for one explicitly selected text file when the excerpt is insufficient. Never request an unscoped full diff. Do not reconstruct the current editable state from metrics.
-3. Inspect every file you propose to change with `read_file_content` before writing a patch.
+3. Inspect every file you propose to change with `read_file_content` before writing a patch. Git pathspecs such as `projects/<project>/build.sh` are relative to the OSS-Fuzz repository and are not valid workspace-relative read paths. For those files, use the supplied `oss_fuzz_project_directory` absolute path (or prefix the Git path with `oss-fuzz/`). For upstream files, use the supplied `upstream_project_directory` absolute path (or prefix the Git path with `process/project/<project_name>/`).
 4. Keep the patch in the area responsible for the evidenced failure: `process/project/<project_name>/` for an upstream source/build defect, or `oss-fuzz/projects/<project_name>/` for an OSS-Fuzz integration/configuration defect.
 5. Never guess ownership. If the required baseline evidence cannot be read, write `BASELINE_UNAVAILABLE` and its reason to `repair_strategy.txt`; this is evidence failure, not `NO_IMPROVEMENT`. Use `NO_IMPROVEMENT` only after reviewing the current verified baseline evidence and finding no justified smaller candidate.
 6. Write candidate artifacts at the workspace root using exactly `solution.txt` and `repair_strategy.txt`. Never prepend `process/project/<project_name>/`, `oss-fuzz/`, `/workspace/`, or any other directory. For `NO_IMPROVEMENT` or `BASELINE_UNAVAILABLE`, write only `repair_strategy.txt` as specified below.
@@ -64,6 +64,11 @@ it is absent from `solution.txt`; the complete Git diff is authoritative for
 patch completeness. If the evidence is insufficient, leave `ARCHIVE_DROP_FILES`
 empty. This review filters archive content only and must not alter the verified
 repositories or the main repair/optimization counters.
+
+Use workspace-relative names in `ARCHIVE_KEEP_FILES` and `ARCHIVE_DROP_FILES`:
+`oss-fuzz/projects/<project_name>/...` for OSS-Fuzz files and
+`process/project/<project_name>/...` for upstream files. Do not use bare Git
+pathspecs in these archive lists.
 
 If and only if a smaller candidate is justified, write `solution.txt` using the exact existing format:
 

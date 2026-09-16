@@ -57,7 +57,8 @@ from agent_tools import (append_string_to_file, apply_patch,
                          manage_git_state, patch_project_dockerfile,
                          prompt_generate_tool, query_trace_ledger,
                          read_file_content, read_git_changed_files,
-                         read_git_diff, read_projects_from_yaml, run_command,
+                         read_git_diff, read_projects_from_yaml,
+                         read_solver_file_content, run_command,
                          run_ecrcl_localization, run_fuzz_build_and_validate,
                          safe_delete_path, save_commit_diff_to_file,
                          save_file_tree_shallow, update_reflection_journal,
@@ -379,8 +380,15 @@ def _generate_final_report(
   final_added = final_deleted = final_hunks = 0
   try:
     if is_successful and final_patch_snapshot:
-      patch_metrics = final_patch_snapshot.get("archive_metrics")
-      if not patch_metrics:
+      if ("archive_source_patch" in final_patch_snapshot or
+          "archive_config_patch" in final_patch_snapshot):
+        # The archive review may remove generated build artifacts. Always
+        # derive report metrics from the exact patches that will be archived.
+        patch_metrics = _patch_metrics(
+            final_patch_snapshot.get("archive_source_patch", ""),
+            final_patch_snapshot.get("archive_config_patch", ""))
+        final_patch_snapshot["archive_metrics"] = patch_metrics
+      else:
         verified_patches = agent_tools.get_verified_snapshot_patches(
             final_patch_snapshot)
         patch_metrics = verified_patches["metrics"]
@@ -748,6 +756,35 @@ def _split_patch_files(patch_text: str) -> Dict[str, str]:
   return chunks
 
 
+def _patch_metrics(*patches: str) -> Dict[str, int]:
+  """Returns file, line, and hunk metrics for the supplied final patches."""
+  metrics = {"files": 0, "added": 0, "deleted": 0, "hunks": 0}
+  for patch in patches:
+    metrics["files"] += len(_split_patch_files(patch))
+    for line in patch.splitlines():
+      if line.startswith("@@ "):
+        metrics["hunks"] += 1
+      elif line.startswith("+") and not line.startswith("+++"):
+        metrics["added"] += 1
+      elif line.startswith("-") and not line.startswith("---"):
+        metrics["deleted"] += 1
+  return metrics
+
+
+def _normalize_archive_review_paths(paths: set[str],
+                                    workspace_prefix: str) -> set[str]:
+  """Converts safe workspace-relative review paths to Git-relative paths."""
+  normalized = set()
+  for raw_path in paths:
+    path = raw_path.lstrip("./").replace("\\", "/")
+    if path.startswith(workspace_prefix):
+      normalized.add(path[len(workspace_prefix):])
+    elif not path.startswith(("process/", "oss-fuzz/")):
+      # A Git-relative path is also accepted for backwards compatibility.
+      normalized.add(path)
+  return normalized
+
+
 def _parse_archive_review(strategy_path: str) -> Dict[str, Any]:
   """Parse the optimizer's non-mutating archive keep/drop decision."""
   result = {
@@ -857,6 +894,12 @@ async def _review_final_archive_with_optimizer(
           if final_snapshot.get("solution") else "unavailable",
       "verified_solution_history":
           solution_history,
+      "oss_fuzz_project_directory":
+          os.path.join(os.getcwd(), "oss-fuzz", "projects",
+                       project_info["project_name"]),
+      "upstream_project_directory":
+          os.path.join(os.getcwd(), "process", "project",
+                       project_info["project_name"]),
       "instruction":
           "Review archive completeness only. Do not modify repositories or generate solution.txt."
   })
@@ -884,22 +927,18 @@ async def _review_final_archive_with_optimizer(
   # conflicts are retained for safety; the Git diff remains authoritative.
   source_chunks = _split_patch_files(verified["source_patch"])
   config_chunks = _split_patch_files(verified["config_patch"])
-  drop = review["drop"] - review["keep"]
+  source_prefix = f"process/project/{project_info['project_name']}/"
+  source_drop = _normalize_archive_review_paths(review["drop"], source_prefix)
+  source_keep = _normalize_archive_review_paths(review["keep"], source_prefix)
+  config_drop = _normalize_archive_review_paths(review["drop"], "oss-fuzz/")
+  config_keep = _normalize_archive_review_paths(review["keep"], "oss-fuzz/")
+  source_drop -= source_keep
+  config_drop -= config_keep
   source_patch = "".join(
-      chunk for path, chunk in source_chunks.items() if path not in drop)
+      chunk for path, chunk in source_chunks.items() if path not in source_drop)
   config_patch = "".join(
-      chunk for path, chunk in config_chunks.items() if path not in drop)
-  filtered_metrics = dict(verified["metrics"])
-  filtered_metrics.update({"files": 0, "added": 0, "deleted": 0, "hunks": 0})
-  for patch in (source_patch, config_patch):
-    for line in patch.splitlines():
-      if line.startswith("@@ "):
-        filtered_metrics["hunks"] += 1
-      elif line.startswith("+") and not line.startswith("+++"):
-        filtered_metrics["added"] += 1
-      elif line.startswith("-") and not line.startswith("---"):
-        filtered_metrics["deleted"] += 1
-    filtered_metrics["files"] += len(_split_patch_files(patch))
+      chunk for path, chunk in config_chunks.items() if path not in config_drop)
+  filtered_metrics = _patch_metrics(source_patch, config_patch)
   return {
       "status": "success",
       "patches": {
@@ -1473,7 +1512,9 @@ def initialize_agents(
                     seed=LLM_SEED),
       instruction=load_instruction_from_file(
           "instructions/fuzzing_solver_instruction.txt"),
-      tools=[read_file_content, create_or_update_file, list_files_in_dir],
+      tools=[
+          read_solver_file_content, create_or_update_file, list_files_in_dir
+      ],
       output_key="solution_plan",
   )
 
@@ -1718,6 +1759,7 @@ async def process_single_project(
       # work fails while the stream is draining.
       last_validation_report = {}
       current_attempt_id = attempt + 1
+      agent_tools.reset_fuzzing_solver_read_budget()
       processed_event_ids = set()
       ledger_abs_file = TraceLedgerManager.get_ledger_path()
       if os.path.exists(ledger_abs_file):

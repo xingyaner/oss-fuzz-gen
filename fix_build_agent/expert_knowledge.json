@@ -191,6 +191,20 @@
       "keywords": ["command not found", "library not found", "syntax error", "undefined reference"],
       "guideline": "Classify errors: 'command not found' or 'library not found' are Environment-level; 'syntax error' or 'undefined reference' are Code-level.",
       "target_files": ["*"]
+    },
+    {
+      "id": "GL_026",
+      "category": "agent_resource_management",
+      "keywords": [
+        "context window",
+        "token budget",
+        "repeated tool call",
+        "large source file",
+        "read_file_content"
+      ],
+      "guideline": "Within one repair round, read each normalized file-and-mode combination at most once and reuse the prior result. Never request full content for a file larger than 200 lines or 24 KiB; inspect a targeted excerpt instead. If cumulative retrieved source and log content approaches the solver context budget, stop exploration and produce a bounded diagnosis rather than retrying the same reads.",
+      "error_type": "AgentOrchestration",
+      "target_files": ["*"]
     }
   ],
   "error_patterns": [

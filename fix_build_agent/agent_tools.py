@@ -55,6 +55,12 @@ _LATEST_BASIC_INFORMATION: Dict[str, Any] = {}
 APPLIED_PATCH_TARGETS: Set[str] = set()
 _ACTIVE_PROJECT_NAME: Optional[str] = None
 _PROJECT_PHASE = "idle"
+_SOLVER_READ_GUARDS: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+
+SOLVER_MAX_UNIQUE_READS = 12
+SOLVER_MAX_TOTAL_READ_CHARS = 288 * 1024
+SOLVER_MAX_READ_LINES = 200
+SOLVER_MAX_READ_CHARS = 24 * 1024
 
 
 def set_active_project_context(project_name: Optional[str]) -> None:
@@ -69,6 +75,11 @@ def set_project_phase(phase: str) -> None:
   if phase not in {"idle", "main", "draining", "optimizer"}:
     raise ValueError(f"Unknown project phase: {phase}")
   _PROJECT_PHASE = phase
+
+
+def reset_fuzzing_solver_read_budget() -> None:
+  """Drops per-round solver read guards at a project attempt boundary."""
+  _SOLVER_READ_GUARDS.clear()
 
 
 def _reject_if_project_phase_stopped(
@@ -4984,6 +4995,91 @@ def read_file_content(file_path: str,
 
   except Exception as e:
     return {"status": "error", "message": f"Read operation failed: {str(e)}"}
+
+
+def _solver_read_guard_key(
+    tool_context: ToolContext = None) -> Tuple[str, int, int]:
+  """Returns a stable read-budget key for one solver repair round."""
+  state = getattr(getattr(tool_context, "session", None), "state", {}) or {}
+  return (str(state.get("project_name", _ACTIVE_PROJECT_NAME or
+                        "unknown")), int(state.get("attempt_id", 0) or
+                                         0), int(state.get("round_id", 0) or 0))
+
+
+def _truncate_solver_read(content: str) -> Tuple[str, bool]:
+  """Bounds a solver tool response before it enters the model context."""
+  lines = content.splitlines(keepends=True)
+  truncated = len(lines) > SOLVER_MAX_READ_LINES
+  content = "".join(lines[:SOLVER_MAX_READ_LINES])
+  if len(content) > SOLVER_MAX_READ_CHARS:
+    content = content[:SOLVER_MAX_READ_CHARS]
+    truncated = True
+  return content, truncated
+
+
+def read_solver_file_content(file_path: str,
+                             mode: str = "full",
+                             base_dir: str = None,
+                             tool_context: ToolContext = None) -> dict:
+  """Reads one bounded, non-duplicated file view for fuzzing_solver_agent."""
+  from utils.path_utils import DEFAULT_PROJECT_ROOT
+
+  root = base_dir or DEFAULT_PROJECT_ROOT
+  resolved_path = (os.path.normpath(os.path.join(root, file_path))
+                   if not os.path.isabs(file_path) else
+                   os.path.normpath(file_path))
+  guard_key = _solver_read_guard_key(tool_context)
+  guard = _SOLVER_READ_GUARDS.setdefault(guard_key, {
+      "fingerprints": set(),
+      "unique_reads": 0,
+      "chars": 0
+  })
+  fingerprint = (resolved_path, mode)
+  if fingerprint in guard["fingerprints"]:
+    return {
+        "status":
+            "error",
+        "message": ("Duplicate solver read blocked for this repair round. "
+                    "Reuse the prior response instead of requesting the same "
+                    "file and mode again.")
+    }
+  if guard["unique_reads"] >= SOLVER_MAX_UNIQUE_READS:
+    return {
+        "status":
+            "error",
+        "message":
+            ("Solver read budget exhausted (12 unique reads). Write a "
+             "bounded diagnosis or repair strategy without further file reads.")
+    }
+
+  if base_dir is None:
+    result = read_file_content(file_path=file_path, mode=mode)
+  else:
+    result = read_file_content(file_path=file_path,
+                               mode=mode,
+                               base_dir=base_dir)
+  guard["fingerprints"].add(fingerprint)
+  if result.get("status") != "success":
+    return result
+
+  content, truncated = _truncate_solver_read(result.get("content", ""))
+  if guard["chars"] + len(content) > SOLVER_MAX_TOTAL_READ_CHARS:
+    return {
+        "status":
+            "error",
+        "message": (
+            "Solver cumulative read budget exhausted (288 KiB). Write "
+            "a bounded diagnosis or repair strategy without further file reads."
+        )
+    }
+  guard["unique_reads"] += 1
+  guard["chars"] += len(content)
+  result["content"] = content
+  if truncated:
+    result["message"] += (
+        " Content was truncated to 200 lines or 24 KiB; request one distinct "
+        "targeted view only if needed.")
+  return result
 
 
 def _read_only_git_repo_path(repo_path: str) -> Optional[str]:
