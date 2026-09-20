@@ -623,7 +623,7 @@ def _process_total_coverage_gain() -> dict[str, dict[str, Any]]:
   return coverage_gain
 
 
-def main():
+def main() -> int:
   global WORK_DIR
 
   args = parse_args()
@@ -722,6 +722,7 @@ def main():
 
   coverage_gain_dict = _process_total_coverage_gain()
   _print_experiment_results(experiment_results, coverage_gain_dict)
+  return 0
 
 
 if __name__ == '__main__':

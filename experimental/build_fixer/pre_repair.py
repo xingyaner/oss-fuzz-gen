@@ -3,6 +3,15 @@
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 """Acquire, reproduce, and validate recent OSS-Fuzz build-failure metadata.
 
 This is the experiment-safe integration of ``fuzz_error_log_acquisition`` and
@@ -282,7 +291,7 @@ def acquire_logs(raw_root: Path) -> dict[str, Any]:
       for index, button in enumerate(buttons):
         text = button.text
         timestamp = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', text)
-        html = button.get_attribute('outerHTML')
+        html = button.get_attribute('outerHTML') or ''
         if not timestamp or ('icons:done' not in html and
                              'icons:error' not in html):
           continue
