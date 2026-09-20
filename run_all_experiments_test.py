@@ -52,6 +52,40 @@ class ModelResultFamilyTest(unittest.TestCase):
       args = parse_args()
     self.assertTrue(args.fix_build_acquire_and_extract)
 
+  def test_acquire_logs_is_a_standalone_pre_repair_phase(self):
+    with mock.patch.object(sys, 'argv', [
+        'run_all_experiments.py', '--fix-build-acquire-logs',
+        '--pre-repair-project', 'cups-filters', '--pre-repair-project', 'qemu'
+    ]):
+      args = parse_args()
+    self.assertTrue(args.fix_build_acquire_logs)
+    self.assertEqual(args.pre_repair_project, ['cups-filters', 'qemu'])
+
+  def test_reproduction_requires_an_explicit_log_directory(self):
+    with mock.patch.object(sys, 'argv', [
+        'run_all_experiments.py', '--fix-build-reproduce-and-extract',
+        '--model', 'vertex_ai_gemini-3-1-pro'
+    ]):
+      with self.assertRaises(AssertionError):
+        parse_args()
+
+  def test_reproduction_accepts_external_log_directory(self):
+    with mock.patch.object(sys, 'argv', [
+        'run_all_experiments.py', '--fix-build-reproduce-and-extract',
+        '--pre-repair-log-dir', '/tmp/acquired_logs', '--model',
+        'vertex_ai_gemini-3-1-pro'
+    ]):
+      args = parse_args()
+    self.assertEqual(args.pre_repair_log_dir, '/tmp/acquired_logs')
+
+  def test_acquisition_cannot_start_repair_without_repair_input(self):
+    with mock.patch.object(sys, 'argv', [
+        'run_all_experiments.py', '--fix-build-acquire-logs',
+        '--fix-build-agent'
+    ]):
+      with self.assertRaises(AssertionError):
+        parse_args()
+
 
 if __name__ == '__main__':
   unittest.main()

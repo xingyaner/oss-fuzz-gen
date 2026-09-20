@@ -293,6 +293,29 @@ def parse_args() -> argparse.Namespace:
             'reproduce and validate them with Vertex AI, then generate repair '
             'metadata. This replaces the static repair benchmark inputs.'))
   parser.add_argument(
+      '--fix-build-acquire-logs',
+      action='store_true',
+      default=False,
+      help=('Acquires OSS-Fuzz build logs only. Without '
+            '--pre-repair-project, scans all currently failing projects.'))
+  parser.add_argument(
+      '--fix-build-reproduce-and-extract',
+      action='store_true',
+      default=False,
+      help=('Reproduces selected acquired logs with Vertex AI and writes '
+            'validated repair metadata and benchmark YAML files.'))
+  parser.add_argument('--pre-repair-log-dir',
+                      type=str,
+                      default='',
+                      help=('Existing acquired-log directory for '
+                            '--fix-build-reproduce-and-extract.'))
+  parser.add_argument(
+      '--pre-repair-project',
+      action='append',
+      default=[],
+      help=('Restricts log acquisition and/or reproduction to one OSS-Fuzz '
+            'project. May be specified multiple times.'))
+  parser.add_argument(
       '--full-fix-build-agent',
       action='store_true',
       default=False,
@@ -352,6 +375,28 @@ def parse_args() -> argparse.Namespace:
     assert args.model.lower().startswith('vertex_ai_'), (
         '--fix-build-acquire-and-extract requires a Vertex AI model because '
         'the reproduction verifier uses Vertex ADC.')
+    # Preserve the prior combined flag while exposing each phase separately.
+    args.fix_build_acquire_logs = True
+    args.fix_build_reproduce_and_extract = True
+
+  if args.fix_build_reproduce_and_extract:
+    assert args.model.lower().startswith('vertex_ai_'), (
+        '--fix-build-reproduce-and-extract requires a Vertex AI model '
+        'because the reproduction verifier uses Vertex ADC.')
+  if args.pre_repair_log_dir:
+    assert args.fix_build_reproduce_and_extract, (
+        '--pre-repair-log-dir requires --fix-build-reproduce-and-extract.')
+    assert not args.fix_build_acquire_logs, (
+        '--pre-repair-log-dir cannot be combined with '
+        '--fix-build-acquire-logs; the latter already produces the input.')
+  if (args.fix_build_reproduce_and_extract and not args.fix_build_acquire_logs):
+    assert args.pre_repair_log_dir, (
+        '--fix-build-reproduce-and-extract requires --pre-repair-log-dir '
+        'unless --fix-build-acquire-logs is also set.')
+  if args.pre_repair_project:
+    assert (args.fix_build_acquire_logs or
+            args.fix_build_reproduce_and_extract), (
+                '--pre-repair-project requires a pre-repair phase.')
 
   if args.fix_build_optimize_patch:
     assert args.fix_build_agent and args.full_fix_build_agent, (
@@ -376,11 +421,18 @@ def parse_args() -> argparse.Namespace:
   bench_dir = bool(args.benchmarks_directory)
   bench_gen = bool(args.generate_benchmarks)
   num_options = int(bench_yml) + int(bench_dir) + int(bench_gen)
-  assert num_options == 1, (
+  pre_repair_requested = (args.fix_build_acquire_logs or
+                          args.fix_build_reproduce_and_extract)
+  assert (num_options <= 1 if pre_repair_requested else num_options == 1), (
       'One and only one of --benchmark-yaml, --benchmarks-directory and '
       '--generate-benchmarks. --benchmark-yaml takes one benchmark YAML file, '
       '--benchmarks-directory takes: a directory of them and '
       '--generate-benchmarks generates them during analysis.')
+  if (args.fix_build_agent and args.fix_build_acquire_logs and
+      not args.fix_build_reproduce_and_extract):
+    assert num_options == 1, (
+        'A repair run after --fix-build-acquire-logs needs either '
+        '--fix-build-reproduce-and-extract or one static benchmark input.')
 
   # Validate templates.
   assert os.path.isdir(args.template_directory), (
@@ -647,23 +699,59 @@ def main() -> int:
   # right API endpoint is used throughout.
   introspector.set_introspector_endpoints(args.introspector_endpoint)
 
-  run_one_experiment.prepare(args.oss_fuzz_dir)
+  acquisition_only = (args.fix_build_acquire_logs and
+                      not args.fix_build_reproduce_and_extract and
+                      not args.fix_build_agent)
+  if not acquisition_only:
+    run_one_experiment.prepare(args.oss_fuzz_dir)
 
-  if args.fix_build_acquire_and_extract:
+  acquired_log_dir = ''
+  generated_dir = ''
+  if args.fix_build_acquire_logs:
     try:
-      generated_dir = pre_repair.run_pre_repair(args.work_dir,
-                                                oss_fuzz_checkout.OSS_FUZZ_DIR,
-                                                args.model)
+      acquired_log_dir = str(
+          pre_repair.run_log_acquisition(args.work_dir,
+                                         args.pre_repair_project))
     except Exception as error:
-      logger.error('Pre-repair predecessor failed: %s', error)
+      logger.error('Pre-repair log acquisition failed: %s', error)
       traceback.print_exc()
-      add_to_json_report(args.work_dir, 'pre_repair_status', 'failed')
+      add_to_json_report(args.work_dir, 'pre_repair_acquisition_status',
+                         'failed')
+      return 1
+    add_to_json_report(args.work_dir, 'pre_repair_acquisition_status',
+                       'completed')
+    add_to_json_report(args.work_dir, 'pre_repair_acquired_log_directory',
+                       acquired_log_dir)
+
+  if args.fix_build_reproduce_and_extract:
+    log_directory = acquired_log_dir or args.pre_repair_log_dir
+    try:
+      generated_dir = str(
+          pre_repair.run_reproduction_and_extraction(
+              args.work_dir, oss_fuzz_checkout.OSS_FUZZ_DIR, args.model,
+              log_directory, args.pre_repair_project))
+    except Exception as error:
+      logger.error('Pre-repair reproduction and extraction failed: %s', error)
+      traceback.print_exc()
+      add_to_json_report(args.work_dir, 'pre_repair_extraction_status',
+                         'failed')
       return 1
     args.benchmark_yaml = ''
-    args.benchmarks_directory = str(generated_dir)
-    add_to_json_report(args.work_dir, 'pre_repair_status', 'completed')
+    args.benchmarks_directory = generated_dir
+    add_to_json_report(args.work_dir, 'pre_repair_extraction_status',
+                       'completed')
     add_to_json_report(args.work_dir, 'pre_repair_benchmark_directory',
-                       str(generated_dir))
+                       generated_dir)
+
+  if ((args.fix_build_acquire_logs or args.fix_build_reproduce_and_extract) and
+      not args.fix_build_agent):
+    end = time.time()
+    add_to_json_report(args.work_dir, 'completion_time',
+                       time.strftime(TIME_STAMP_FMT, time.gmtime(end)))
+    add_to_json_report(args.work_dir, 'total_run_time',
+                       str(timedelta(seconds=end - start)))
+    return 0
+
   experiment_targets = prepare_experiment_targets(args)
   if args.fix_build_agent:
     oss_fuzz_checkout.ENABLE_CACHING = False

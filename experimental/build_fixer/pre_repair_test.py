@@ -61,6 +61,32 @@ class PreRepairSelectionTest(unittest.TestCase):
       self.assertEqual(collisions, ['2026-06-20'])
       self.assertEqual({path.name for path in kept}, set(names))
 
+  def test_project_filter_limits_selected_log_tree(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      source = root / 'source'
+      destination = root / 'destination'
+      for project in ('cups-filters', 'qemu'):
+        project_dir = source / project
+        project_dir.mkdir(parents=True)
+        (project_dir / '2026_6_20 error').touch()
+      report = pre_repair.filter_log_tree(source, destination, ['cups-filters'])
+      self.assertTrue(
+          (destination / 'cups-filters' / '2026_6_20 error').is_file())
+      self.assertFalse((destination / 'qemu').exists())
+      self.assertEqual(report['copied_count'], 1)
+
+  def test_project_filter_reports_missing_requested_projects(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      source = root / 'source'
+      (source / 'cups-filters').mkdir(parents=True)
+      (source / 'cups-filters' / '2026_6_20 error').touch()
+      report = pre_repair.filter_log_tree(root / 'source', root / 'destination',
+                                          ['qemu'])
+      self.assertEqual(report['missing_projects'], ['qemu'])
+      self.assertEqual(report['copied_count'], 0)
+
   def test_required_metadata_rejects_empty_values(self):
     entry = {field: 'set' for field in pre_repair.REQUIRED_METADATA}
     entry['engine'] = ''

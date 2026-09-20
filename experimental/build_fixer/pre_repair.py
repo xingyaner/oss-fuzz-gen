@@ -26,6 +26,7 @@ import calendar
 import dataclasses
 import datetime as dt
 import json
+import logging
 import os
 import re
 import shutil
@@ -39,6 +40,7 @@ from typing import Any, Iterable
 import yaml
 
 LOG_ROOT_NAME = 'acquired_logs'
+LOGGER = logging.getLogger(__name__)
 REQUIRED_METADATA = ('oss-fuzz_sha', 'software_sha', 'base_image_digest',
                      'fuzzing_build_error_log', 'software_repo_url', 'engine',
                      'sanitizer', 'architecture')
@@ -125,7 +127,9 @@ def select_boundary_logs(
   return keep, collisions
 
 
-def filter_log_tree(source: Path, destination: Path) -> dict[str, Any]:
+def filter_log_tree(source: Path,
+                    destination: Path,
+                    projects: Iterable[str] | None = None) -> dict[str, Any]:
   """Copies state-boundary logs without applying a date-window filter."""
   destination.mkdir(parents=True, exist_ok=True)
   report: dict[str, Any] = {
@@ -135,9 +139,18 @@ def filter_log_tree(source: Path, destination: Path) -> dict[str, Any]:
   }
   if not source.is_dir():
     raise PreRepairError(f'acquisition did not create log root: {source}')
+  selected_projects = set(projects or [])
+  available_projects = {
+      project_dir.name
+      for project_dir in source.iterdir()
+      if project_dir.is_dir()
+  }
+  missing_projects = sorted(selected_projects - available_projects)
   for project_dir in sorted(source.iterdir()):
     if not project_dir.is_dir():
       report['skipped_paths'].append(str(project_dir))
+      continue
+    if selected_projects and project_dir.name not in selected_projects:
       continue
     all_logs: list[LogFile] = []
     for child in sorted(project_dir.iterdir()):
@@ -166,6 +179,8 @@ def filter_log_tree(source: Path, destination: Path) -> dict[str, Any]:
         'collision_dates': collisions
     })
     report['copied_count'] += len(copied)
+  if missing_projects:
+    report['missing_projects'] = missing_projects
   return report
 
 
@@ -259,7 +274,8 @@ def _download(url: str, destination: Path) -> None:
   destination.write_bytes(content)
 
 
-def acquire_logs(raw_root: Path) -> dict[str, Any]:
+def acquire_logs(raw_root: Path,
+                 projects: Iterable[str] | None = None) -> dict[str, Any]:
   """Runs the one-shot equivalent of key_log_obtain.py.
 
   Browser/page failures are collected per project and do not silently become
@@ -267,17 +283,25 @@ def acquire_logs(raw_root: Path) -> dict[str, Any]:
   input set.
   """
   raw_root.mkdir(parents=True, exist_ok=True)
-  projects = _error_projects()
-  if not projects:
+  requested_projects = sorted(set(projects or []))
+  if requested_projects:
+    target_projects = requested_projects
+  else:
+    LOGGER.warning(
+        'No --pre-repair-project was supplied; scanning every currently '
+        'failing project on the OSS-Fuzz status website.')
+    target_projects = _error_projects()
+  if not target_projects:
     raise PreRepairError(
         'key-log acquisition found no failed OSS-Fuzz projects')
   report: dict[str, Any] = {
-      'failure_projects': projects,
+      'failure_projects': target_projects,
+      'requested_projects': requested_projects,
       'downloaded': [],
       'project_errors': {}
   }
   from selenium.webdriver.common.by import By
-  for project in projects:
+  for project in target_projects:
     driver = _chrome_driver()
     try:
       driver.get(
@@ -713,28 +737,83 @@ def _valid_entry(entry: dict[str, Any]) -> list[str]:
   ]
 
 
-def run_pre_repair(work_dir: str,
-                   oss_fuzz_source: str,
-                   model: str,
-                   now: dt.date | None = None) -> Path:
-  """Executes the enabled predecessor and returns its generated YAML directory."""
+def _pre_repair_root(work_dir: str) -> Path:
+  root = Path(work_dir) / 'pre_repair'
+  root.mkdir(parents=True, exist_ok=True)
+  return root
+
+
+def _write_manifest(root: Path, manifest: dict[str, Any]) -> None:
+  (root / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n',
+                                      encoding='utf-8')
+
+
+def run_log_acquisition(work_dir: str,
+                        projects: Iterable[str] | None = None) -> Path:
+  """Acquires OSS-Fuzz logs and returns the durable acquired-log directory."""
+  root = _pre_repair_root(work_dir)
+  raw = root / LOG_ROOT_NAME
+  if raw.exists():
+    shutil.rmtree(raw)
+  manifest: dict[str, Any] = {'status': 'acquiring', 'errors': []}
+  try:
+    manifest['acquisition'] = acquire_logs(raw, projects)
+    manifest['status'] = 'acquired'
+    return raw
+  except Exception as error:
+    manifest.update(status='failed',
+                    errors=[f'{type(error).__name__}: {error}'])
+    raise
+  finally:
+    _write_manifest(root, manifest)
+
+
+def run_reproduction_and_extraction(work_dir: str,
+                                    oss_fuzz_source: str,
+                                    model: str,
+                                    log_directory: str,
+                                    projects: Iterable[str] | None = None,
+                                    now: dt.date | None = None) -> Path:
+  """Reproduces selected logs and returns the generated repair benchmarks."""
   today = now or dt.datetime.now(dt.timezone.utc).date()
   start = subtract_calendar_months(today)
-  root = Path(work_dir) / 'pre_repair'
-  if root.exists():
-    shutil.rmtree(root)
-  raw = root / LOG_ROOT_NAME
+  root = _pre_repair_root(work_dir)
+  raw = Path(log_directory)
+  if not raw.is_dir():
+    raise PreRepairError(f'pre-repair log directory does not exist: {raw}')
   filtered_logs = root / 'selected_logs'
-  root.mkdir(parents=True)
+  previous_manifest: dict[str, Any] = {}
+  manifest_path = root / 'manifest.json'
+  if manifest_path.is_file():
+    try:
+      previous_manifest = json.loads(manifest_path.read_text(encoding='utf-8'))
+    except json.JSONDecodeError:
+      # A corrupt prior manifest must not prevent a fresh extraction, but the
+      # new manifest records only artifacts produced by this invocation.
+      previous_manifest = {}
+  for output_path in (filtered_logs, root / 'metadata', root / 'benchmarks',
+                      root / 'reproduction_workspace'):
+    if output_path.exists():
+      shutil.rmtree(output_path)
   manifest: dict[str, Any] = {
-      'status': 'running',
+      'status': 'reproducing',
+      'log_directory': str(raw),
+      'requested_projects': sorted(set(projects or [])),
       'commit_mapping_window_start': start.isoformat(),
       'commit_mapping_window_end': today.isoformat(),
       'errors': []
   }
+  if 'acquisition' in previous_manifest:
+    manifest['acquisition'] = previous_manifest['acquisition']
   try:
-    manifest['acquisition'] = acquire_logs(raw)
-    manifest['selection'] = filter_log_tree(raw, filtered_logs)
+    selection = filter_log_tree(raw, filtered_logs, projects)
+    manifest['selection'] = selection
+    if selection.get('missing_projects'):
+      raise PreRepairError(
+          'requested projects are absent from the log input: ' +
+          ', '.join(selection['missing_projects']))
+    if not selection['copied_count']:
+      raise PreRepairError('log selection produced no reproducible error logs')
     entries: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
@@ -808,6 +887,16 @@ def run_pre_repair(work_dir: str,
                     errors=[f'{type(error).__name__}: {error}'])
     raise
   finally:
-    (root / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n',
-                                        encoding='utf-8')
+    _write_manifest(root, manifest)
   return benchmark_dir
+
+
+def run_pre_repair(work_dir: str,
+                   oss_fuzz_source: str,
+                   model: str,
+                   projects: Iterable[str] | None = None,
+                   now: dt.date | None = None) -> Path:
+  """Compatibility wrapper for the original acquire-then-extract workflow."""
+  acquired_logs = run_log_acquisition(work_dir, projects)
+  return run_reproduction_and_extraction(work_dir, oss_fuzz_source, model,
+                                         str(acquired_logs), projects, now)
