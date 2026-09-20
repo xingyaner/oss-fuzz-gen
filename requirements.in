@@ -15,7 +15,7 @@ pyright==1.1.345
 #pytype==2023.7.28
 PyYAML==6.0.2
 requests==2.32.4
-selenium==4.44.0
+selenium==4.31.0
 rust-demangler==1.0
 tiktoken==0.9.0
 yapf==0.40.1
