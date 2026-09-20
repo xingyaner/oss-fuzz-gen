@@ -249,14 +249,20 @@ def _wait_for_status(driver: Any) -> None:
 
 
 def _wait_for_project_history(driver: Any) -> None:
-  """Waits for asynchronously populated project data inside the shadow root."""
+  """Waits for a parseable history record inside the project shadow root."""
   from selenium.webdriver.support.ui import WebDriverWait
   WebDriverWait(
-      driver, 100).until(lambda active_driver: active_driver.execute_script("""
+      driver, 100).until(lambda active_driver: active_driver.execute_script(r"""
 const status = document.querySelector('build-status');
 if (!status || !status.shadowRoot) return false;
-return Boolean(
-    status.shadowRoot.querySelector('div.buildHistory paper-button'));
+const buttons = Array.from(
+    status.shadowRoot.querySelectorAll('div.buildHistory paper-button'));
+return buttons.some(button => {
+  const text = button.textContent || '';
+  const html = button.outerHTML || '';
+  return /\d{4}[/-]\d{1,2}[/-]\d{1,2}/.test(text) &&
+      /icon=["'][^"']*(done|error)["']/i.test(html);
+});
 """))
 
 
@@ -299,32 +305,48 @@ def _is_key_project(statuses: Iterable[str]) -> bool:
   return 'success' in recent and 'error' in recent
 
 
-def _button_status(button: Any) -> str:
-  html = button.get_attribute('outerHTML') or ''
-  if 'icons:done' in html:
+def _button_status(html: str) -> str:
+  icon = re.search(r'icon=["\'][^"\']*(done|error)["\']', html, re.IGNORECASE)
+  if icon and icon.group(1).lower() == 'done':
     return 'success'
-  if 'icons:error' in html:
+  if icon and icon.group(1).lower() == 'error':
     return 'error'
   return ''
 
 
-def _visible_history(driver: Any) -> list[dict[str, Any]]:
+def _visible_history(
+    driver: Any,
+    observation: dict[str, Any] | None = None) -> list[dict[str, Any]]:
   """Returns dated build-history buttons in the status page display order."""
   entries = []
-  buttons = driver.execute_script("""
+  records = driver.execute_script("""
 const status = document.querySelector('build-status');
 if (!status || !status.shadowRoot) return [];
-return Array.from(
-    status.shadowRoot.querySelectorAll('div.buildHistory paper-button'));
+return Array.from(status.shadowRoot.querySelectorAll(
+    'div.buildHistory paper-button')).map((button, index) => ({
+      button: button,
+      index: index,
+      text: button.textContent || '',
+      html: button.outerHTML || ''
+    }));
 """) or []
-  for index, button in enumerate(buttons):
-    timestamp = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', button.text)
-    status = _button_status(button)
+  if observation is not None:
+    observation.update({
+        'raw_history_count':
+            len(records),
+        'raw_history_text': [
+            str(item.get('text', ''))[:200] for item in records
+        ]
+    })
+  for record in records:
+    timestamp = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',
+                          str(record.get('text', '')))
+    status = _button_status(str(record.get('html', '')))
     if timestamp and status:
       entries.append({
-          'index': index,
-          'button': button,
-          'date': timestamp.group(1),
+          'index': record['index'],
+          'button': record['button'],
+          'date': '/'.join(timestamp.groups()),
           'status': status,
       })
   return entries
@@ -430,12 +452,14 @@ def acquire_logs(raw_root: Path,
           project)
       _wait_for_status(driver)
       _wait_for_project_history(driver)
-      history = _visible_history(driver)
+      observation: dict[str, Any] = {}
+      history = _visible_history(driver, observation)
       statuses = [entry['status'] for entry in history]
-      report['project_observations'][project] = {
+      observation.update({
           'history_count': len(history),
           'history_statuses': statuses,
-      }
+      })
+      report['project_observations'][project] = observation
       if mode == 'key' and not _is_key_project(statuses):
         report['skipped_projects'][project] = (
             'no success-to-error boundary in the latest seven build records')

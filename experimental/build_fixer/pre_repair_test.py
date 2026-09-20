@@ -30,6 +30,10 @@ class PreRepairSelectionTest(unittest.TestCase):
     self.assertFalse(pre_repair._is_key_project(['error'] * 7 + ['success']))
     self.assertFalse(pre_repair._is_key_project(['success'] * 7))
 
+  def test_button_status_accepts_namespaced_and_plain_icons(self):
+    self.assertEqual(pre_repair._button_status('icon="icons:done"'), 'success')
+    self.assertEqual(pre_repair._button_status('icon="error"'), 'error')
+
   def test_acquisition_rejects_unknown_mode_before_browser_access(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       with self.assertRaisesRegex(pre_repair.PreRepairError,
