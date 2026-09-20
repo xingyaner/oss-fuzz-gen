@@ -52,6 +52,26 @@ class PreRepairSelectionTest(unittest.TestCase):
     assert report is not None
     self.assertEqual(report['selected_projects'], ['airflow'])
     self.assertEqual(report['downloaded'], [])
+    self.assertEqual(report['project_observations']['airflow']['history_count'],
+                     0)
+
+  def test_wait_for_log_url_polls_until_link_is_available(self):
+    driver = mock.MagicMock()
+    with mock.patch.object(pre_repair, '_current_log_url',
+                           side_effect=['', '', 'https://example/log.txt']), \
+         mock.patch.object(pre_repair.time, 'sleep'):
+      self.assertEqual(pre_repair._wait_for_log_url(driver, timeout=1),
+                       'https://example/log.txt')
+
+  def test_wait_for_log_url_ignores_previous_build_link(self):
+    driver = mock.MagicMock()
+    old_url = 'https://example/old.txt'
+    new_url = 'https://example/new.txt'
+    with mock.patch.object(pre_repair, '_current_log_url',
+                           side_effect=[old_url, old_url, new_url]), \
+         mock.patch.object(pre_repair.time, 'sleep'):
+      self.assertEqual(pre_repair._wait_for_log_url(driver, old_url, 1),
+                       new_url)
 
   def test_calendar_window_matches_requested_example(self):
     self.assertEqual(pre_repair.subtract_calendar_months(dt.date(2026, 9, 20)),

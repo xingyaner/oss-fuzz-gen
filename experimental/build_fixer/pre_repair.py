@@ -256,8 +256,7 @@ def _wait_for_project_history(driver: Any) -> None:
 const status = document.querySelector('build-status');
 if (!status || !status.shadowRoot) return false;
 return Boolean(
-    status.shadowRoot.querySelector('div.buildHistory paper-button') ||
-    status.shadowRoot.querySelector('paper-button.green'));
+    status.shadowRoot.querySelector('div.buildHistory paper-button'));
 """))
 
 
@@ -336,8 +335,10 @@ def _current_log_url(driver: Any) -> str:
 const matches = [];
 function visit(root) {
   for (const link of root.querySelectorAll('a[href]')) {
-    const href = link.getAttribute('href') || '';
-    if (/^\/log-[^/]+\.txt$/.test(href)) matches.push(href);
+    const target = new URL(link.getAttribute('href') || '', document.baseURI);
+    if (/^\/log-[^/]+\.txt$/.test(target.pathname)) {
+      matches.push(target.href);
+    }
   }
   for (const element of root.querySelectorAll('*')) {
     if (element.shadowRoot) visit(element.shadowRoot);
@@ -348,30 +349,42 @@ return matches.length ? matches[0] : '';
 """)
   if not url:
     return ''
-  return 'https://oss-fuzz-build-logs.storage.googleapis.com' + str(url)
+  return str(url)
 
 
-def _last_success_entry(driver: Any) -> dict[str, str] | None:
-  """Opens the status page's separate last-success button, if available."""
+def _wait_for_log_url(driver: Any,
+                      previous_url: str = '',
+                      timeout: float = 30) -> str:
+  """Waits until a selected build renders a new non-empty log URL."""
+  deadline = time.monotonic() + timeout
+  while time.monotonic() < deadline:
+    url = _current_log_url(driver)
+    if url and url != previous_url:
+      return url
+    time.sleep(.5)
+  return ''
+
+
+def _last_success_entry(driver: Any) -> dict[str, Any] | None:
+  """Returns the status page's separate last-success button, if available."""
   result = driver.execute_script("""
 const status = document.querySelector('build-status');
 const button = status && status.shadowRoot &&
     status.shadowRoot.querySelector('paper-button.green');
 if (!button) return null;
-const text = button.textContent || '';
-button.click();
-return text;
+return {button: button, text: button.textContent || ''};
 """)
   if not result:
     return None
-  timestamp = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', str(result))
+  timestamp = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', str(result['text']))
   if not timestamp:
     return None
-  time.sleep(1)
-  url = _current_log_url(driver)
-  if not url:
-    return None
-  return {'date': timestamp.group(1), 'status': 'success', 'url': url}
+  return {
+      'button': result['button'],
+      'date': timestamp.group(1),
+      'status': 'success',
+      'index': 'last-success'
+  }
 
 
 def acquire_logs(raw_root: Path,
@@ -405,6 +418,8 @@ def acquire_logs(raw_root: Path,
       'selected_projects': [],
       'skipped_projects': {},
       'downloaded': [],
+      'project_observations': {},
+      'log_errors': [],
       'project_errors': {}
   }
   for project in target_projects:
@@ -417,6 +432,10 @@ def acquire_logs(raw_root: Path,
       _wait_for_project_history(driver)
       history = _visible_history(driver)
       statuses = [entry['status'] for entry in history]
+      report['project_observations'][project] = {
+          'history_count': len(history),
+          'history_statuses': statuses,
+      }
       if mode == 'key' and not _is_key_project(statuses):
         report['skipped_projects'][project] = (
             'no success-to-error boundary in the latest seven build records')
@@ -434,13 +453,21 @@ def acquire_logs(raw_root: Path,
         date_name = entry['date'].replace('/', '_') + ' ' + status
         url = entry.get('url', '')
         if not url:
+          previous_url = _current_log_url(driver)
           driver.execute_script('arguments[0].click();', entry['button'])
-          time.sleep(1)
-          url = _current_log_url(driver)
+          url = _wait_for_log_url(driver, previous_url)
         # File names intentionally remain compatible with the downstream
         # boundary selector, which accepts one state per project/day.
         identity = (project, date_name)
-        if not url or identity in seen:
+        if not url:
+          report['log_errors'].append({
+              'project': project,
+              'file': date_name,
+              'button_index': index,
+              'error': 'log URL did not appear within 30 seconds'
+          })
+          continue
+        if identity in seen:
           continue
         seen.add(identity)
         destination = raw_root / project / date_name
