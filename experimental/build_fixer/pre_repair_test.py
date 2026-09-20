@@ -17,6 +17,7 @@ import datetime as dt
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from experimental.build_fixer import pre_repair
 
@@ -34,6 +35,21 @@ class PreRepairSelectionTest(unittest.TestCase):
       with self.assertRaisesRegex(pre_repair.PreRepairError,
                                   'unsupported acquisition mode'):
         pre_repair.acquire_logs(Path(temp_dir), ['cups-filters'], 'unknown')
+
+  def test_zero_download_error_preserves_acquisition_diagnostics(self):
+    driver = mock.MagicMock()
+    with tempfile.TemporaryDirectory() as temp_dir:
+      with mock.patch.object(
+          pre_repair, '_chrome_driver', return_value=driver), mock.patch.object(
+              pre_repair, '_wait_for_status'), mock.patch.object(
+                  pre_repair, '_wait_for_project_history'), mock.patch.object(
+                      pre_repair, '_visible_history',
+                      return_value=[]), self.assertRaises(
+                          pre_repair.PreRepairError) as raised:
+        pre_repair.acquire_logs(Path(temp_dir), ['airflow'], 'all')
+    self.assertIsNotNone(raised.exception.report)
+    self.assertEqual(raised.exception.report['selected_projects'], ['airflow'])
+    self.assertEqual(raised.exception.report['downloaded'], [])
 
   def test_calendar_window_matches_requested_example(self):
     self.assertEqual(pre_repair.subtract_calendar_months(dt.date(2026, 9, 20)),

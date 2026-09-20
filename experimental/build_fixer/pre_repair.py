@@ -55,6 +55,12 @@ COMPILE_CONFIG = re.compile(
 class PreRepairError(RuntimeError):
   """A controlled predecessor failure recorded in the manifest."""
 
+  def __init__(self,
+               message: str,
+               report: dict[str, Any] | None = None) -> None:
+    super().__init__(message)
+    self.report = report
+
 
 @dataclasses.dataclass(frozen=True)
 class LogFile:
@@ -240,7 +246,19 @@ def _wait_for_status(driver: Any) -> None:
   from selenium.webdriver.support.ui import WebDriverWait
   WebDriverWait(driver, 100).until(
       expected.presence_of_element_located((By.CSS_SELECTOR, 'build-status')))
-  time.sleep(5)
+
+
+def _wait_for_project_history(driver: Any) -> None:
+  """Waits for asynchronously populated project data inside the shadow root."""
+  from selenium.webdriver.support.ui import WebDriverWait
+  WebDriverWait(
+      driver, 100).until(lambda active_driver: active_driver.execute_script("""
+const status = document.querySelector('build-status');
+if (!status || !status.shadowRoot) return false;
+return Boolean(
+    status.shadowRoot.querySelector('div.buildHistory paper-button') ||
+    status.shadowRoot.querySelector('paper-button.green'));
+"""))
 
 
 def _error_projects() -> list[str]:
@@ -396,6 +414,7 @@ def acquire_logs(raw_root: Path,
           'https://oss-fuzz-build-logs.storage.googleapis.com/index.html#' +
           project)
       _wait_for_status(driver)
+      _wait_for_project_history(driver)
       history = _visible_history(driver)
       statuses = [entry['status'] for entry in history]
       if mode == 'key' and not _is_key_project(statuses):
@@ -438,7 +457,7 @@ def acquire_logs(raw_root: Path,
       driver.quit()
   if not report['downloaded']:
     raise PreRepairError(
-        f'{mode}-log acquisition downloaded no usable log files')
+        f'{mode}-log acquisition downloaded no usable log files', report)
   return report
 
 
@@ -858,6 +877,8 @@ def run_log_acquisition(work_dir: str,
     manifest['status'] = 'acquired'
     return raw
   except Exception as error:
+    if isinstance(error, PreRepairError) and error.report is not None:
+      manifest['acquisition'] = error.report
     manifest.update(status='failed',
                     errors=[f'{type(error).__name__}: {error}'])
     raise
