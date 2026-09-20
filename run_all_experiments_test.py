@@ -14,9 +14,11 @@
 """Tests for experiment-level result organization."""
 
 import os
+import sys
 import unittest
+from unittest import mock
 
-from run_all_experiments import _model_result_family
+from run_all_experiments import _model_result_family, parse_args
 
 
 class ModelResultFamilyTest(unittest.TestCase):
@@ -40,6 +42,15 @@ class ModelResultFamilyTest(unittest.TestCase):
     """Maps compatible and DeepSeek models to the DeepSeek result family."""
     self.assertEqual(_model_result_family('openai_compatible'), 'deepseek')
     self.assertEqual(_model_result_family('deepseek-chat'), 'deepseek')
+
+  def test_pre_repair_requires_full_vertex_build_repair(self):
+    with mock.patch.object(sys, 'argv', [
+        'run_all_experiments.py', '--benchmarks-directory', 'unused',
+        '--fix-build-agent', '--full-fix-build-agent',
+        '--fix-build-acquire-and-extract', '--model', 'vertex_ai_gemini-3-1-pro'
+    ]):
+      args = parse_args()
+    self.assertTrue(args.fix_build_acquire_and_extract)
 
 
 if __name__ == '__main__':

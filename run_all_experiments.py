@@ -33,6 +33,7 @@ from data_prep import introspector
 from experiment import benchmark as benchmarklib
 from experiment import evaluator, oss_fuzz_checkout, textcov
 from experiment.workdir import WorkDirs
+from experimental.build_fixer import pre_repair
 from llm_toolkit import models, prompt_builder
 
 logger = logging.getLogger(__name__)
@@ -285,6 +286,13 @@ def parse_args() -> argparse.Namespace:
                       default=False,
                       help='Enables OSS-Fuzz project build repair mode.')
   parser.add_argument(
+      '--fix-build-acquire-and-extract',
+      action='store_true',
+      default=False,
+      help=('Runs the opt-in predecessor: acquire recent OSS-Fuzz build logs, '
+            'reproduce and validate them with Vertex AI, then generate repair '
+            'metadata. This replaces the static repair benchmark inputs.'))
+  parser.add_argument(
       '--full-fix-build-agent',
       action='store_true',
       default=False,
@@ -336,6 +344,14 @@ def parse_args() -> argparse.Namespace:
         '--full-fix-build-agent requires --fix-build-agent.')
     if not args.external_fix_build_agent_path:
       args.external_fix_build_agent_path = BUNDLED_FIX_BUILD_AGENT_DIR
+
+  if args.fix_build_acquire_and_extract:
+    assert args.fix_build_agent and args.full_fix_build_agent, (
+        '--fix-build-acquire-and-extract requires --fix-build-agent and '
+        '--full-fix-build-agent.')
+    assert args.model.lower().startswith('vertex_ai_'), (
+        '--fix-build-acquire-and-extract requires a Vertex AI model because '
+        'the reproduction verifier uses Vertex ADC.')
 
   if args.fix_build_optimize_patch:
     assert args.fix_build_agent and args.full_fix_build_agent, (
@@ -633,6 +649,21 @@ def main():
 
   run_one_experiment.prepare(args.oss_fuzz_dir)
 
+  if args.fix_build_acquire_and_extract:
+    try:
+      generated_dir = pre_repair.run_pre_repair(args.work_dir,
+                                                oss_fuzz_checkout.OSS_FUZZ_DIR,
+                                                args.model)
+    except Exception as error:
+      logger.error('Pre-repair predecessor failed: %s', error)
+      traceback.print_exc()
+      add_to_json_report(args.work_dir, 'pre_repair_status', 'failed')
+      return 1
+    args.benchmark_yaml = ''
+    args.benchmarks_directory = str(generated_dir)
+    add_to_json_report(args.work_dir, 'pre_repair_status', 'completed')
+    add_to_json_report(args.work_dir, 'pre_repair_benchmark_directory',
+                       str(generated_dir))
   experiment_targets = prepare_experiment_targets(args)
   if args.fix_build_agent:
     oss_fuzz_checkout.ENABLE_CACHING = False
