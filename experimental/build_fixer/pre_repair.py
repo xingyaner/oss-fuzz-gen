@@ -332,7 +332,7 @@ return Array.from(
 
 
 def _current_log_url(driver: Any) -> str:
-  url = driver.execute_script("""
+  url = driver.execute_script(r"""
 const matches = [];
 function visit(root) {
   for (const link of root.querySelectorAll('a[href]')) {

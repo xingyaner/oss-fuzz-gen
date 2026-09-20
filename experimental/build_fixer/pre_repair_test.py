@@ -47,9 +47,11 @@ class PreRepairSelectionTest(unittest.TestCase):
                       return_value=[]), self.assertRaises(
                           pre_repair.PreRepairError) as raised:
         pre_repair.acquire_logs(Path(temp_dir), ['airflow'], 'all')
-    self.assertIsNotNone(raised.exception.report)
-    self.assertEqual(raised.exception.report['selected_projects'], ['airflow'])
-    self.assertEqual(raised.exception.report['downloaded'], [])
+    report = raised.exception.report
+    self.assertIsNotNone(report)
+    assert report is not None
+    self.assertEqual(report['selected_projects'], ['airflow'])
+    self.assertEqual(report['downloaded'], [])
 
   def test_calendar_window_matches_requested_example(self):
     self.assertEqual(pre_repair.subtract_calendar_months(dt.date(2026, 9, 20)),
