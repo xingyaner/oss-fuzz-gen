@@ -23,6 +23,18 @@ from experimental.build_fixer import pre_repair
 
 class PreRepairSelectionTest(unittest.TestCase):
 
+  def test_key_project_requires_success_and_error_in_latest_seven(self):
+    self.assertTrue(
+        pre_repair._is_key_project(['error', 'error', 'success', 'error']))
+    self.assertFalse(pre_repair._is_key_project(['error'] * 7 + ['success']))
+    self.assertFalse(pre_repair._is_key_project(['success'] * 7))
+
+  def test_acquisition_rejects_unknown_mode_before_browser_access(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      with self.assertRaisesRegex(pre_repair.PreRepairError,
+                                  'unsupported acquisition mode'):
+        pre_repair.acquire_logs(Path(temp_dir), ['cups-filters'], 'unknown')
+
   def test_calendar_window_matches_requested_example(self):
     self.assertEqual(pre_repair.subtract_calendar_months(dt.date(2026, 9, 20)),
                      dt.date(2026, 6, 20))

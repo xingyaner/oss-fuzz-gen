@@ -316,6 +316,14 @@ def parse_args() -> argparse.Namespace:
       help=('Restricts log acquisition and/or reproduction to one OSS-Fuzz '
             'project. May be specified multiple times.'))
   parser.add_argument(
+      '--pre-repair-acquisition-mode',
+      choices=('key', 'all'),
+      default='key',
+      help=('Log acquisition scope. "key" keeps projects whose latest seven '
+            'build records contain both success and failure; "all" attempts '
+            'every currently failing project and includes its last successful '
+            'build when available.'))
+  parser.add_argument(
       '--full-fix-build-agent',
       action='store_true',
       default=False,
@@ -397,6 +405,9 @@ def parse_args() -> argparse.Namespace:
     assert (args.fix_build_acquire_logs or
             args.fix_build_reproduce_and_extract), (
                 '--pre-repair-project requires a pre-repair phase.')
+  if args.pre_repair_acquisition_mode != 'key':
+    assert args.fix_build_acquire_logs, (
+        '--pre-repair-acquisition-mode requires --fix-build-acquire-logs.')
 
   if args.fix_build_optimize_patch:
     assert args.fix_build_agent and args.full_fix_build_agent, (
@@ -710,8 +721,8 @@ def main() -> int:
   if args.fix_build_acquire_logs:
     try:
       acquired_log_dir = str(
-          pre_repair.run_log_acquisition(args.work_dir,
-                                         args.pre_repair_project))
+          pre_repair.run_log_acquisition(args.work_dir, args.pre_repair_project,
+                                         args.pre_repair_acquisition_mode))
     except Exception as error:
       logger.error('Pre-repair log acquisition failed: %s', error)
       traceback.print_exc()

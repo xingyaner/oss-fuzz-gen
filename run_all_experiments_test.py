@@ -60,6 +60,23 @@ class ModelResultFamilyTest(unittest.TestCase):
       args = parse_args()
     self.assertTrue(args.fix_build_acquire_logs)
     self.assertEqual(args.pre_repair_project, ['cups-filters', 'qemu'])
+    self.assertEqual(args.pre_repair_acquisition_mode, 'key')
+
+  def test_all_log_acquisition_mode(self):
+    with mock.patch.object(sys, 'argv', [
+        'run_all_experiments.py', '--fix-build-acquire-logs',
+        '--pre-repair-acquisition-mode', 'all'
+    ]):
+      args = parse_args()
+    self.assertEqual(args.pre_repair_acquisition_mode, 'all')
+
+  def test_acquisition_mode_requires_acquisition_phase(self):
+    with mock.patch.object(sys, 'argv', [
+        'run_all_experiments.py', '--pre-repair-acquisition-mode', 'all',
+        '--benchmarks-directory', 'unused'
+    ]):
+      with self.assertRaises(AssertionError):
+        parse_args()
 
   def test_reproduction_requires_an_explicit_log_directory(self):
     with mock.patch.object(sys, 'argv', [

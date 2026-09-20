@@ -40,6 +40,8 @@ from typing import Any, Iterable
 import yaml
 
 LOG_ROOT_NAME = 'acquired_logs'
+ACQUISITION_MODES = ('key', 'all')
+KEY_RECENT_BUILD_COUNT = 7
 LOGGER = logging.getLogger(__name__)
 REQUIRED_METADATA = ('oss-fuzz_sha', 'software_sha', 'base_image_digest',
                      'fuzzing_build_error_log', 'software_repo_url', 'engine',
@@ -274,14 +276,98 @@ def _download(url: str, destination: Path) -> None:
   destination.write_bytes(content)
 
 
+def _is_key_project(statuses: Iterable[str]) -> bool:
+  """Returns whether recent history identifies a newly failing project."""
+  recent = list(statuses)[:KEY_RECENT_BUILD_COUNT]
+  return 'success' in recent and 'error' in recent
+
+
+def _button_status(button: Any) -> str:
+  html = button.get_attribute('outerHTML') or ''
+  if 'icons:done' in html:
+    return 'success'
+  if 'icons:error' in html:
+    return 'error'
+  return ''
+
+
+def _visible_history(driver: Any) -> list[dict[str, Any]]:
+  """Returns dated build-history buttons in the status page display order."""
+  entries = []
+  buttons = driver.execute_script("""
+const status = document.querySelector('build-status');
+if (!status || !status.shadowRoot) return [];
+return Array.from(
+    status.shadowRoot.querySelectorAll('div.buildHistory paper-button'));
+""") or []
+  for index, button in enumerate(buttons):
+    timestamp = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', button.text)
+    status = _button_status(button)
+    if timestamp and status:
+      entries.append({
+          'index': index,
+          'button': button,
+          'date': timestamp.group(1),
+          'status': status,
+      })
+  return entries
+
+
+def _current_log_url(driver: Any) -> str:
+  url = driver.execute_script("""
+const matches = [];
+function visit(root) {
+  for (const link of root.querySelectorAll('a[href]')) {
+    const href = link.getAttribute('href') || '';
+    if (/^\/log-[^/]+\.txt$/.test(href)) matches.push(href);
+  }
+  for (const element of root.querySelectorAll('*')) {
+    if (element.shadowRoot) visit(element.shadowRoot);
+  }
+}
+visit(document);
+return matches.length ? matches[0] : '';
+""")
+  if not url:
+    return ''
+  return 'https://oss-fuzz-build-logs.storage.googleapis.com' + str(url)
+
+
+def _last_success_entry(driver: Any) -> dict[str, str] | None:
+  """Opens the status page's separate last-success button, if available."""
+  result = driver.execute_script("""
+const status = document.querySelector('build-status');
+const button = status && status.shadowRoot &&
+    status.shadowRoot.querySelector('paper-button.green');
+if (!button) return null;
+const text = button.textContent || '';
+button.click();
+return text;
+""")
+  if not result:
+    return None
+  timestamp = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', str(result))
+  if not timestamp:
+    return None
+  time.sleep(1)
+  url = _current_log_url(driver)
+  if not url:
+    return None
+  return {'date': timestamp.group(1), 'status': 'success', 'url': url}
+
+
 def acquire_logs(raw_root: Path,
-                 projects: Iterable[str] | None = None) -> dict[str, Any]:
-  """Runs the one-shot equivalent of key_log_obtain.py.
+                 projects: Iterable[str] | None = None,
+                 mode: str = 'key') -> dict[str, Any]:
+  """Acquires either recent-transition (key) or all failed-project logs.
 
   Browser/page failures are collected per project and do not silently become
   metadata.  A total index failure is fatal because it produces no trustworthy
   input set.
   """
+  if mode not in ACQUISITION_MODES:
+    raise PreRepairError(
+        f'unsupported acquisition mode {mode!r}; expected key or all')
   raw_root.mkdir(parents=True, exist_ok=True)
   requested_projects = sorted(set(projects or []))
   if requested_projects:
@@ -295,12 +381,14 @@ def acquire_logs(raw_root: Path,
     raise PreRepairError(
         'key-log acquisition found no failed OSS-Fuzz projects')
   report: dict[str, Any] = {
+      'mode': mode,
       'failure_projects': target_projects,
       'requested_projects': requested_projects,
+      'selected_projects': [],
+      'skipped_projects': {},
       'downloaded': [],
       'project_errors': {}
   }
-  from selenium.webdriver.common.by import By
   for project in target_projects:
     driver = _chrome_driver()
     try:
@@ -308,27 +396,34 @@ def acquire_logs(raw_root: Path,
           'https://oss-fuzz-build-logs.storage.googleapis.com/index.html#' +
           project)
       _wait_for_status(driver)
-      # Unlike the original script's UI-neighbour heuristic, download every
-      # visible history entry and apply the audited boundary algorithm later.
-      buttons = driver.find_elements(By.CSS_SELECTOR,
-                                     'div.buildHistory paper-button')
-      for index, button in enumerate(buttons):
-        text = button.text
-        timestamp = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', text)
-        html = button.get_attribute('outerHTML') or ''
-        if not timestamp or ('icons:done' not in html and
-                             'icons:error' not in html):
+      history = _visible_history(driver)
+      statuses = [entry['status'] for entry in history]
+      if mode == 'key' and not _is_key_project(statuses):
+        report['skipped_projects'][project] = (
+            'no success-to-error boundary in the latest seven build records')
+        continue
+      report['selected_projects'].append(project)
+      entries: list[dict[str, Any]] = list(history)
+      if mode == 'all':
+        last_success = _last_success_entry(driver)
+        if last_success:
+          entries.insert(0, last_success)
+      seen: set[tuple[str, str]] = set()
+      for entry in entries:
+        index = entry.get('index', 'last-success')
+        status = entry['status']
+        date_name = entry['date'].replace('/', '_') + ' ' + status
+        url = entry.get('url', '')
+        if not url:
+          driver.execute_script('arguments[0].click();', entry['button'])
+          time.sleep(1)
+          url = _current_log_url(driver)
+        # File names intentionally remain compatible with the downstream
+        # boundary selector, which accepts one state per project/day.
+        identity = (project, date_name)
+        if not url or identity in seen:
           continue
-        status = 'success' if 'icons:done' in html else 'error'
-        date_name = timestamp.group(1).replace('/', '_') + ' ' + status
-        driver.execute_script('arguments[0].click();', button)
-        time.sleep(1)
-        _expand(driver)
-        links = re.findall(r'href=["\'](/log-[^"\']+\.txt)["\']',
-                           driver.page_source)
-        if not links:
-          continue
-        url = 'https://oss-fuzz-build-logs.storage.googleapis.com' + links[0]
+        seen.add(identity)
         destination = raw_root / project / date_name
         _download(url, destination)
         report['downloaded'].append({
@@ -342,7 +437,8 @@ def acquire_logs(raw_root: Path,
     finally:
       driver.quit()
   if not report['downloaded']:
-    raise PreRepairError('key-log acquisition downloaded no usable log files')
+    raise PreRepairError(
+        f'{mode}-log acquisition downloaded no usable log files')
   return report
 
 
@@ -749,7 +845,8 @@ def _write_manifest(root: Path, manifest: dict[str, Any]) -> None:
 
 
 def run_log_acquisition(work_dir: str,
-                        projects: Iterable[str] | None = None) -> Path:
+                        projects: Iterable[str] | None = None,
+                        mode: str = 'key') -> Path:
   """Acquires OSS-Fuzz logs and returns the durable acquired-log directory."""
   root = _pre_repair_root(work_dir)
   raw = root / LOG_ROOT_NAME
@@ -757,7 +854,7 @@ def run_log_acquisition(work_dir: str,
     shutil.rmtree(raw)
   manifest: dict[str, Any] = {'status': 'acquiring', 'errors': []}
   try:
-    manifest['acquisition'] = acquire_logs(raw, projects)
+    manifest['acquisition'] = acquire_logs(raw, projects, mode)
     manifest['status'] = 'acquired'
     return raw
   except Exception as error:
