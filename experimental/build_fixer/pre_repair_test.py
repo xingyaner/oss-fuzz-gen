@@ -97,9 +97,8 @@ class PreRepairSelectionTest(unittest.TestCase):
                                                   '_download') as download:
       report = pre_repair.acquire_logs(Path(temp_dir), ['airflow'], 'all')
 
-    self.assertEqual([item['file'] for item in report['downloaded']], [
-        '2026_03_23 success', '2026_09_15 error'
-    ])
+    self.assertEqual([item['file'] for item in report['downloaded']],
+                     ['2026_03_23 success', '2026_09_15 error'])
     self.assertEqual(download.call_count, 2)
     observation = report['project_observations']['airflow']
     self.assertEqual(observation['candidate_log_count'], 8)
@@ -107,6 +106,7 @@ class PreRepairSelectionTest(unittest.TestCase):
     self.assertEqual(observation['filtered_log_count'], 6)
 
   def test_pre_download_filter_keeps_success_edges_and_day_collision(self):
+
     def entry(day, status):
       return {'date': f'2026/09/{day:02d}', 'status': status}
 
@@ -130,19 +130,43 @@ class PreRepairSelectionTest(unittest.TestCase):
 
   def test_pre_download_filter_drops_project_with_only_successes(self):
     candidates = [
-        {'date': '2026/09/10', 'status': 'success'},
-        {'date': '2026/09/11', 'status': 'success'},
+        {
+            'date': '2026/09/10',
+            'status': 'success'
+        },
+        {
+            'date': '2026/09/11',
+            'status': 'success'
+        },
     ]
     self.assertEqual(pre_repair._select_boundary_entries(candidates), [])
 
   def test_pre_download_filter_discovers_multiple_dynamic_runs(self):
     candidates = [
-        {'date': '2026/01/03', 'status': 'error'},
-        {'date': '2026/01/08', 'status': 'error'},
-        {'date': '2026/02/14', 'status': 'success'},
-        {'date': '2026/04/01', 'status': 'success'},
-        {'date': '2026/07/19', 'status': 'error'},
-        {'date': '2026/08/30', 'status': 'error'},
+        {
+            'date': '2026/01/03',
+            'status': 'error'
+        },
+        {
+            'date': '2026/01/08',
+            'status': 'error'
+        },
+        {
+            'date': '2026/02/14',
+            'status': 'success'
+        },
+        {
+            'date': '2026/04/01',
+            'status': 'success'
+        },
+        {
+            'date': '2026/07/19',
+            'status': 'error'
+        },
+        {
+            'date': '2026/08/30',
+            'status': 'error'
+        },
     ]
     selected = pre_repair._select_boundary_entries(reversed(candidates))
     self.assertEqual([(item['date'], item['status']) for item in selected], [

@@ -41,7 +41,8 @@ import yaml
 LOG_ROOT_NAME = 'acquired_logs'
 ACQUISITION_MODES = ('key', 'all')
 KEY_RECENT_BUILD_COUNT = 7
-BUILD_STATUS_URL = 'https://oss-fuzz-build-logs.storage.googleapis.com/status.json'
+BUILD_STATUS_URL = ('https://oss-fuzz-build-logs.storage.googleapis.com/'
+                    'status.json')
 BUILD_LOG_ROOT = 'https://oss-fuzz-build-logs.storage.googleapis.com'
 LOGGER = logging.getLogger(__name__)
 REQUIRED_METADATA = ('oss-fuzz_sha', 'software_sha', 'base_image_digest',
@@ -287,8 +288,7 @@ def _select_boundary_entries(
     if set(day_entries) == {'success', 'error'}:
       select_segment()
       segment = []
-      selected.extend(day_entries[status]
-                      for status in ('success', 'error'))
+      selected.extend(day_entries[status] for status in ('success', 'error'))
     else:
       segment.extend(day_entries.values())
   select_segment()
@@ -561,6 +561,7 @@ def _checkout_for_date(commit_mapping: Iterable[dict[str, str]],
 
 
 def _copy_oss_fuzz(source: Path, destination: Path) -> None:
+  """Copies the OSS-Fuzz checkout into an isolated working directory."""
   if destination.exists():
     shutil.rmtree(destination)
   result = _run(
@@ -626,7 +627,8 @@ def _patch_reproduction_dockerfile(dockerfile: Path, digest: str,
           line = line.replace('--depth 1', '').replace('--depth=1', '')
           suffix = ' \\\n' if line.rstrip().endswith('\\') else '\n'
           line = line.rstrip().rstrip('\\').rstrip()
-          line += f' && cd {target} && git checkout {dependency["rev"]} && cd -{suffix}'
+          checkout = f' && cd {target} && git checkout {dependency["rev"]}'
+          line += f'{checkout} && cd -{suffix}'
           changed = True
           break
     patched_lines.append(line)
@@ -654,7 +656,7 @@ def _vertex_model_name(model: str) -> str:
 
 def _vertex_match(model: str, original_tail: str,
                   reproduced_tail: str) -> dict[str, Any]:
-  """Uses Vertex, rather than DeepSeek, for the reproduction equivalence decision."""
+  """Uses Vertex to decide whether reproduction errors are equivalent."""
   from google import genai
   from google.auth import default
   _, project_id = default()
@@ -663,12 +665,12 @@ def _vertex_match(model: str, original_tail: str,
   location = (os.getenv('VERTEX_LOCATION') or
               os.getenv('VERTEX_AI_LOCATIONS', 'global').split(',')[0])
   client = genai.Client(vertexai=True, project=project_id, location=location)
-  prompt = (
-      'Compare these two OSS-Fuzz build failure tails. Reply only JSON '
-      'with keys matches (boolean) and error_category (RC1..RC25). '
-      'Treat incidental paths, timestamps, and line numbers as equal.\n'
-      f'ORIGINAL:\n{original_tail[-12000:]}\nREPRODUCED:\n{reproduced_tail[-12000:]}'
-  )
+  original_excerpt = original_tail[-12000:]
+  reproduced_excerpt = reproduced_tail[-12000:]
+  prompt = ('Compare these two OSS-Fuzz build failure tails. Reply only JSON '
+            'with keys matches (boolean) and error_category (RC1..RC25). '
+            'Treat incidental paths, timestamps, and line numbers as equal.\n'
+            f'ORIGINAL:\n{original_excerpt}\nREPRODUCED:\n{reproduced_excerpt}')
   response = client.models.generate_content(model=_vertex_model_name(model),
                                             contents=prompt)
   text = response.text or ''
@@ -781,14 +783,16 @@ def _reproduce_one(
     if not verdict['matches']:
       evidence['status'] = 'mismatch'
       return None, evidence
+    extracted_metadata = {}
+    for key in REQUIRED_METADATA:
+      if key != 'oss-fuzz_sha':
+        extracted_metadata[key] = metadata.get(key, '')
     entry = {
         'project': project,
         'language': language,
         'error_time': parsed.log_date.isoformat(),
         'oss-fuzz_sha': oss_fuzz_sha,
-        **{
-            key: metadata.get(key, '') for key in REQUIRED_METADATA if key != 'oss-fuzz_sha'
-        }, 'error_category': verdict['error_category'],
+        **extracted_metadata, 'error_category': verdict['error_category'],
         'fixed_state': 'no'
     }
     evidence['status'] = 'verified'
@@ -829,9 +833,13 @@ def run_log_acquisition(work_dir: str,
     manifest['acquisition'] = acquire_logs(raw, projects, mode)
     manifest['status'] = 'acquired'
     return raw
-  except Exception as error:
-    if isinstance(error, PreRepairError) and error.report is not None:
+  except PreRepairError as error:
+    if error.report is not None:
       manifest['acquisition'] = error.report
+    manifest.update(status='failed',
+                    errors=[f'{type(error).__name__}: {error}'])
+    raise
+  except Exception as error:
     manifest.update(status='failed',
                     errors=[f'{type(error).__name__}: {error}'])
     raise
