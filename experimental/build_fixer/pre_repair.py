@@ -31,7 +31,6 @@ import os
 import re
 import shutil
 import subprocess
-import time
 import urllib.request
 from collections import defaultdict, deque
 from pathlib import Path
@@ -42,6 +41,8 @@ import yaml
 LOG_ROOT_NAME = 'acquired_logs'
 ACQUISITION_MODES = ('key', 'all')
 KEY_RECENT_BUILD_COUNT = 7
+BUILD_STATUS_URL = 'https://oss-fuzz-build-logs.storage.googleapis.com/status.json'
+BUILD_LOG_ROOT = 'https://oss-fuzz-build-logs.storage.googleapis.com'
 LOGGER = logging.getLogger(__name__)
 REQUIRED_METADATA = ('oss-fuzz_sha', 'software_sha', 'base_image_digest',
                      'fuzzing_build_error_log', 'software_repo_url', 'engine',
@@ -192,100 +193,20 @@ def filter_log_tree(source: Path,
   return report
 
 
-def _chrome_driver():
-  """Creates the Debian Chromium driver used by the acquired-log workflow."""
+def _status_projects() -> list[dict[str, Any]]:
+  """Loads the structured data consumed by the OSS-Fuzz status page."""
+  request = urllib.request.Request(BUILD_STATUS_URL,
+                                   headers={'User-Agent': 'oss-fuzz-gen'})
   try:
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.chrome.service import Service
-  except ImportError as error:
+    with urllib.request.urlopen(request, timeout=60) as response:
+      payload = json.loads(response.read())
+  except Exception as error:
     raise PreRepairError(
-        'Selenium is unavailable; rebuild the experiment image.') from error
-  options = Options()
-  options.add_argument('--headless=new')
-  options.add_argument('--no-sandbox')
-  options.add_argument('--disable-dev-shm-usage')
-  options.add_argument('--disable-gpu')
-  if os.path.exists('/usr/bin/chromium'):
-    options.binary_location = '/usr/bin/chromium'
-  driver_path = shutil.which('chromedriver')
-  if not driver_path:
-    raise PreRepairError(
-        'chromedriver is unavailable; rebuild the experiment image.')
-  return webdriver.Chrome(service=Service(driver_path), options=options)
-
-
-_EXPAND_SHADOW_DOM = """
-function expand(root) {
-  let count = 0;
-  for (const el of Array.from(root.querySelectorAll('*'))) {
-    if (el.shadowRoot && !el.shadowRoot.__ofgExpanded) {
-      const copy = document.createElement('div');
-      copy.className = '__ofg_shadow_contents';
-      copy.innerHTML = el.shadowRoot.innerHTML;
-      el.appendChild(copy); el.shadowRoot.__ofgExpanded = true;
-      count += 1 + expand(copy);
-    }
-  }
-  return count;
-}
-return expand(document.body);
-"""
-
-
-def _expand(driver: Any) -> None:
-  for _ in range(30):
-    if not driver.execute_script(_EXPAND_SHADOW_DOM):
-      return
-    time.sleep(.1)
-
-
-def _wait_for_status(driver: Any) -> None:
-  from selenium.webdriver.common.by import By
-  from selenium.webdriver.support import expected_conditions as expected
-  from selenium.webdriver.support.ui import WebDriverWait
-  WebDriverWait(driver, 100).until(
-      expected.presence_of_element_located((By.CSS_SELECTOR, 'build-status')))
-
-
-def _wait_for_project_history(driver: Any) -> None:
-  """Waits for a parseable history record inside the project shadow root."""
-  from selenium.webdriver.support.ui import WebDriverWait
-  WebDriverWait(
-      driver, 100).until(lambda active_driver: active_driver.execute_script(r"""
-const status = document.querySelector('build-status');
-if (!status || !status.shadowRoot) return false;
-const buttons = Array.from(
-    status.shadowRoot.querySelectorAll('div.buildHistory paper-button'));
-return buttons.some(button => {
-  const text = button.textContent || '';
-  const html = button.outerHTML || '';
-  return /\d{4}[/-]\d{1,2}[/-]\d{1,2}/.test(text) &&
-      /icon=["'][^"']*(done|error)["']/i.test(html);
-});
-"""))
-
-
-def _error_projects() -> list[str]:
-  """Fetches the failure projects from key_log_obtain's rendered index."""
-  driver = _chrome_driver()
-  try:
-    driver.get('https://oss-fuzz-build-logs.storage.googleapis.com/index.html')
-    _wait_for_status(driver)
-    _expand(driver)
-    # This is the extraction rule used by key_log_obtain.py after shadow-DOM
-    # expansion. Keep its DOM-tolerant capture and validate only after cleanup.
-    pattern = re.compile(
-        r'<iron-icon[^>]*icon=["\']icons:error["\'][\s\S]*?</iron-icon>'
-        r'[\s\S]*?([^<\s][^<]+?)\s*</div>', re.IGNORECASE)
-    projects = []
-    for raw_name in pattern.findall(driver.page_source):
-      name = raw_name.split('>')[-1].strip()
-      if re.fullmatch(r'[A-Za-z0-9_.-]+', name):
-        projects.append(name)
-    return sorted(set(projects))
-  finally:
-    driver.quit()
+        f'failed to load OSS-Fuzz status data: {error}') from error
+  projects = payload.get('projects') if isinstance(payload, dict) else None
+  if not isinstance(projects, list):
+    raise PreRepairError('OSS-Fuzz status data has no projects list')
+  return [item for item in projects if isinstance(item, dict)]
 
 
 def _download(url: str, destination: Path) -> None:
@@ -305,107 +226,24 @@ def _is_key_project(statuses: Iterable[str]) -> bool:
   return 'success' in recent and 'error' in recent
 
 
-def _button_status(html: str) -> str:
-  icon = re.search(r'icon=["\'][^"\']*(done|error)["\']', html, re.IGNORECASE)
-  if icon and icon.group(1).lower() == 'done':
-    return 'success'
-  if icon and icon.group(1).lower() == 'error':
-    return 'error'
-  return ''
-
-
-def _visible_history(
-    driver: Any,
-    observation: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-  """Returns dated build-history buttons in the status page display order."""
-  entries = []
-  records = driver.execute_script("""
-const status = document.querySelector('build-status');
-if (!status || !status.shadowRoot) return [];
-return Array.from(status.shadowRoot.querySelectorAll(
-    'div.buildHistory paper-button')).map((button, index) => ({
-      button: button,
-      index: index,
-      text: button.textContent || '',
-      html: button.outerHTML || ''
-    }));
-""") or []
-  if observation is not None:
-    observation.update({
-        'raw_history_count':
-            len(records),
-        'raw_history_text': [
-            str(item.get('text', ''))[:200] for item in records
-        ]
-    })
-  for record in records:
-    timestamp = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',
-                          str(record.get('text', '')))
-    status = _button_status(str(record.get('html', '')))
-    if timestamp and status:
-      entries.append({
-          'index': record['index'],
-          'button': record['button'],
-          'date': '/'.join(timestamp.groups()),
-          'status': status,
-      })
-  return entries
-
-
-def _current_log_url(driver: Any) -> str:
-  url = driver.execute_script(r"""
-const matches = [];
-function visit(root) {
-  for (const link of root.querySelectorAll('a[href]')) {
-    const target = new URL(link.getAttribute('href') || '', document.baseURI);
-    if (/^\/log-[^/]+\.txt$/.test(target.pathname)) {
-      matches.push(target.href);
-    }
-  }
-  for (const element of root.querySelectorAll('*')) {
-    if (element.shadowRoot) visit(element.shadowRoot);
-  }
-}
-visit(document);
-return matches.length ? matches[0] : '';
-""")
-  if not url:
-    return ''
-  return str(url)
-
-
-def _wait_for_log_url(driver: Any,
-                      previous_url: str = '',
-                      timeout: float = 30) -> str:
-  """Waits until a selected build renders a new non-empty log URL."""
-  deadline = time.monotonic() + timeout
-  while time.monotonic() < deadline:
-    url = _current_log_url(driver)
-    if url and url != previous_url:
-      return url
-    time.sleep(.5)
-  return ''
-
-
-def _last_success_entry(driver: Any) -> dict[str, Any] | None:
-  """Returns the status page's separate last-success button, if available."""
-  result = driver.execute_script("""
-const status = document.querySelector('build-status');
-const button = status && status.shadowRoot &&
-    status.shadowRoot.querySelector('paper-button.green');
-if (!button) return null;
-return {button: button, text: button.textContent || ''};
-""")
-  if not result:
+def _build_entry(record: Any, index: int | str) -> dict[str, Any] | None:
+  """Converts one status.json build record into a downloadable log entry."""
+  if not isinstance(record, dict):
     return None
-  timestamp = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', str(result['text']))
-  if not timestamp:
+  build_id = str(record.get('build_id') or '')
+  finish_time = str(record.get('finish_time') or '')
+  if (not re.fullmatch(r'[A-Za-z0-9-]+', build_id) or len(finish_time) < 10):
     return None
+  try:
+    log_date = dt.date.fromisoformat(finish_time[:10])
+  except ValueError:
+    return None
+  status = 'success' if record.get('success') else 'error'
   return {
-      'button': result['button'],
-      'date': timestamp.group(1),
-      'status': 'success',
-      'index': 'last-success'
+      'index': index,
+      'date': log_date.strftime('%Y/%m/%d'),
+      'status': status,
+      'url': f'{BUILD_LOG_ROOT}/log-{build_id}.txt'
   }
 
 
@@ -423,19 +261,24 @@ def acquire_logs(raw_root: Path,
         f'unsupported acquisition mode {mode!r}; expected key or all')
   raw_root.mkdir(parents=True, exist_ok=True)
   requested_projects = sorted(set(projects or []))
-  if requested_projects:
-    target_projects = requested_projects
-  else:
+  if not requested_projects:
     LOGGER.warning(
         'No --pre-repair-project was supplied; scanning every currently '
         'failing project on the OSS-Fuzz status website.')
-    target_projects = _error_projects()
-  if not target_projects:
-    raise PreRepairError(
-        'key-log acquisition found no failed OSS-Fuzz projects')
+  status_projects = _status_projects()
+  by_name = {
+      str(item.get('name')): item
+      for item in status_projects
+      if item.get('name')
+  }
+  failure_projects = sorted(
+      name for name, item in by_name.items()
+      if isinstance(item.get('history'), list) and item['history'] and
+      not bool(item['history'][0].get('success')))
+  target_projects = requested_projects or failure_projects
   report: dict[str, Any] = {
       'mode': mode,
-      'failure_projects': target_projects,
+      'failure_projects': failure_projects,
       'requested_projects': requested_projects,
       'selected_projects': [],
       'skipped_projects': {},
@@ -445,21 +288,27 @@ def acquire_logs(raw_root: Path,
       'project_errors': {}
   }
   for project in target_projects:
-    driver = _chrome_driver()
     try:
-      driver.get(
-          'https://oss-fuzz-build-logs.storage.googleapis.com/index.html#' +
-          project)
-      _wait_for_status(driver)
-      _wait_for_project_history(driver)
-      observation: dict[str, Any] = {}
-      history = _visible_history(driver, observation)
+      project_status = by_name.get(project)
+      if project_status is None:
+        report['skipped_projects'][project] = 'not present in status.json'
+        continue
+      if project not in failure_projects:
+        report['skipped_projects'][project] = 'project is not currently failing'
+        continue
+      raw_history = project_status.get('history')
+      if not isinstance(raw_history, list):
+        raise PreRepairError('project history is not a list')
+      history = [
+          entry for index, record in enumerate(raw_history)
+          if (entry := _build_entry(record, index)) is not None
+      ]
       statuses = [entry['status'] for entry in history]
-      observation.update({
+      report['project_observations'][project] = {
+          'raw_history_count': len(raw_history),
           'history_count': len(history),
           'history_statuses': statuses,
-      })
-      report['project_observations'][project] = observation
+      }
       if mode == 'key' and not _is_key_project(statuses):
         report['skipped_projects'][project] = (
             'no success-to-error boundary in the latest seven build records')
@@ -467,35 +316,35 @@ def acquire_logs(raw_root: Path,
       report['selected_projects'].append(project)
       entries: list[dict[str, Any]] = list(history)
       if mode == 'all':
-        last_success = _last_success_entry(driver)
+        last_success = _build_entry(project_status.get('last_successful_build'),
+                                    'last-success')
         if last_success:
+          last_success['status'] = 'success'
           entries.insert(0, last_success)
       seen: set[tuple[str, str]] = set()
       for entry in entries:
         index = entry.get('index', 'last-success')
         status = entry['status']
         date_name = entry['date'].replace('/', '_') + ' ' + status
-        url = entry.get('url', '')
-        if not url:
-          previous_url = _current_log_url(driver)
-          driver.execute_script('arguments[0].click();', entry['button'])
-          url = _wait_for_log_url(driver, previous_url)
+        url = entry['url']
         # File names intentionally remain compatible with the downstream
         # boundary selector, which accepts one state per project/day.
         identity = (project, date_name)
-        if not url:
-          report['log_errors'].append({
-              'project': project,
-              'file': date_name,
-              'button_index': index,
-              'error': 'log URL did not appear within 30 seconds'
-          })
-          continue
         if identity in seen:
           continue
         seen.add(identity)
         destination = raw_root / project / date_name
-        _download(url, destination)
+        try:
+          _download(url, destination)
+        except PreRepairError as error:
+          report['log_errors'].append({
+              'project': project,
+              'file': date_name,
+              'button_index': index,
+              'url': url,
+              'error': str(error)
+          })
+          continue
         report['downloaded'].append({
             'project': project,
             'file': date_name,
@@ -504,8 +353,6 @@ def acquire_logs(raw_root: Path,
         })
     except Exception as error:  # Keep independent project failures observable.
       report['project_errors'][project] = f'{type(error).__name__}: {error}'
-    finally:
-      driver.quit()
   if not report['downloaded']:
     raise PreRepairError(
         f'{mode}-log acquisition downloaded no usable log files', report)

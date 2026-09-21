@@ -30,10 +30,6 @@ class PreRepairSelectionTest(unittest.TestCase):
     self.assertFalse(pre_repair._is_key_project(['error'] * 7 + ['success']))
     self.assertFalse(pre_repair._is_key_project(['success'] * 7))
 
-  def test_button_status_accepts_namespaced_and_plain_icons(self):
-    self.assertEqual(pre_repair._button_status('icon="icons:done"'), 'success')
-    self.assertEqual(pre_repair._button_status('icon="error"'), 'error')
-
   def test_acquisition_rejects_unknown_mode_before_browser_access(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       with self.assertRaisesRegex(pre_repair.PreRepairError,
@@ -41,15 +37,12 @@ class PreRepairSelectionTest(unittest.TestCase):
         pre_repair.acquire_logs(Path(temp_dir), ['cups-filters'], 'unknown')
 
   def test_zero_download_error_preserves_acquisition_diagnostics(self):
-    driver = mock.MagicMock()
+    status = {'name': 'airflow', 'history': [{}]}
     with tempfile.TemporaryDirectory() as temp_dir:
-      with mock.patch.object(
-          pre_repair, '_chrome_driver', return_value=driver), mock.patch.object(
-              pre_repair, '_wait_for_status'), mock.patch.object(
-                  pre_repair, '_wait_for_project_history'), mock.patch.object(
-                      pre_repair, '_visible_history',
-                      return_value=[]), self.assertRaises(
-                          pre_repair.PreRepairError) as raised:
+      with mock.patch.object(pre_repair,
+                             '_status_projects',
+                             return_value=[status]), self.assertRaises(
+                                 pre_repair.PreRepairError) as raised:
         pre_repair.acquire_logs(Path(temp_dir), ['airflow'], 'all')
     report = raised.exception.report
     self.assertIsNotNone(report)
@@ -59,23 +52,29 @@ class PreRepairSelectionTest(unittest.TestCase):
     self.assertEqual(report['project_observations']['airflow']['history_count'],
                      0)
 
-  def test_wait_for_log_url_polls_until_link_is_available(self):
-    driver = mock.MagicMock()
-    with mock.patch.object(pre_repair, '_current_log_url',
-                           side_effect=['', '', 'https://example/log.txt']), \
-         mock.patch.object(pre_repair.time, 'sleep'):
-      self.assertEqual(pre_repair._wait_for_log_url(driver, timeout=1),
-                       'https://example/log.txt')
-
-  def test_wait_for_log_url_ignores_previous_build_link(self):
-    driver = mock.MagicMock()
-    old_url = 'https://example/old.txt'
-    new_url = 'https://example/new.txt'
-    with mock.patch.object(pre_repair, '_current_log_url',
-                           side_effect=[old_url, old_url, new_url]), \
-         mock.patch.object(pre_repair.time, 'sleep'):
-      self.assertEqual(pre_repair._wait_for_log_url(driver, old_url, 1),
-                       new_url)
+  def test_all_mode_builds_log_urls_directly_from_status_data(self):
+    status = {
+        'name': 'airflow',
+        'history': [{
+            'build_id': 'failure-id',
+            'finish_time': '2026-09-21T06:20:11Z',
+            'success': False
+        }],
+        'last_successful_build': {
+            'build_id': 'success-id',
+            'finish_time': '2026-03-23T07:11:41Z'
+        }
+    }
+    with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+        pre_repair, '_status_projects',
+        return_value=[status]), mock.patch.object(pre_repair,
+                                                  '_download') as download:
+      report = pre_repair.acquire_logs(Path(temp_dir), ['airflow'], 'all')
+    self.assertEqual(len(report['downloaded']), 2)
+    self.assertEqual({call.args[0] for call in download.call_args_list}, {
+        pre_repair.BUILD_LOG_ROOT + '/log-failure-id.txt',
+        pre_repair.BUILD_LOG_ROOT + '/log-success-id.txt'
+    })
 
   def test_calendar_window_matches_requested_example(self):
     self.assertEqual(pre_repair.subtract_calendar_months(dt.date(2026, 9, 20)),
