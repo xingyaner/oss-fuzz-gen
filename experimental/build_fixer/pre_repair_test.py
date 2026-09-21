@@ -76,6 +76,82 @@ class PreRepairSelectionTest(unittest.TestCase):
         pre_repair.BUILD_LOG_ROOT + '/log-success-id.txt'
     })
 
+  def test_all_mode_filters_continuous_errors_before_download(self):
+    history = [{
+        'build_id': f'failure-{day}',
+        'finish_time': f'2026-09-{day:02d}T06:20:11Z',
+        'success': False
+    } for day in range(21, 14, -1)]
+    status = {
+        'name': 'airflow',
+        'history': history,
+        'last_successful_build': {
+            'build_id': 'success-id',
+            'finish_time': '2026-03-23T07:11:41Z',
+            'success': True
+        }
+    }
+    with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+        pre_repair, '_status_projects',
+        return_value=[status]), mock.patch.object(pre_repair,
+                                                  '_download') as download:
+      report = pre_repair.acquire_logs(Path(temp_dir), ['airflow'], 'all')
+
+    self.assertEqual([item['file'] for item in report['downloaded']], [
+        '2026_03_23 success', '2026_09_15 error'
+    ])
+    self.assertEqual(download.call_count, 2)
+    observation = report['project_observations']['airflow']
+    self.assertEqual(observation['candidate_log_count'], 8)
+    self.assertEqual(observation['selected_log_count'], 2)
+    self.assertEqual(observation['filtered_log_count'], 6)
+
+  def test_pre_download_filter_keeps_success_edges_and_day_collision(self):
+    def entry(day, status):
+      return {'date': f'2026/09/{day:02d}', 'status': status}
+
+    candidates = [
+        entry(10, 'success'),
+        entry(11, 'success'),
+        entry(12, 'error'),
+        entry(12, 'success'),
+        entry(13, 'success'),
+        entry(14, 'success'),
+    ]
+    selected = pre_repair._select_boundary_entries(candidates)
+    self.assertEqual([(item['date'], item['status']) for item in selected], [
+        ('2026/09/10', 'success'),
+        ('2026/09/11', 'success'),
+        ('2026/09/12', 'success'),
+        ('2026/09/12', 'error'),
+        ('2026/09/13', 'success'),
+        ('2026/09/14', 'success'),
+    ])
+
+  def test_pre_download_filter_drops_project_with_only_successes(self):
+    candidates = [
+        {'date': '2026/09/10', 'status': 'success'},
+        {'date': '2026/09/11', 'status': 'success'},
+    ]
+    self.assertEqual(pre_repair._select_boundary_entries(candidates), [])
+
+  def test_pre_download_filter_discovers_multiple_dynamic_runs(self):
+    candidates = [
+        {'date': '2026/01/03', 'status': 'error'},
+        {'date': '2026/01/08', 'status': 'error'},
+        {'date': '2026/02/14', 'status': 'success'},
+        {'date': '2026/04/01', 'status': 'success'},
+        {'date': '2026/07/19', 'status': 'error'},
+        {'date': '2026/08/30', 'status': 'error'},
+    ]
+    selected = pre_repair._select_boundary_entries(reversed(candidates))
+    self.assertEqual([(item['date'], item['status']) for item in selected], [
+        ('2026/01/03', 'error'),
+        ('2026/02/14', 'success'),
+        ('2026/04/01', 'success'),
+        ('2026/07/19', 'error'),
+    ])
+
   def test_calendar_window_matches_requested_example(self):
     self.assertEqual(pre_repair.subtract_calendar_months(dt.date(2026, 9, 20)),
                      dt.date(2026, 6, 20))

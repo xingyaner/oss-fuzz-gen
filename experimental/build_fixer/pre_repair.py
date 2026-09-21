@@ -247,6 +247,54 @@ def _build_entry(record: Any, index: int | str) -> dict[str, Any] | None:
   }
 
 
+def _select_boundary_entries(
+    entries: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+  """Selects status-boundary logs before their contents are downloaded.
+
+  Error runs keep their earliest entry and success runs keep their first and
+  last entries.  A day containing both statuses is retained in full and
+  separates the runs on either side.  Multiple builds with the same date and
+  status map to one output file, so only the first such entry is considered.
+  """
+  candidates = list(entries)
+  if not any(entry['status'] == 'error' for entry in candidates):
+    return []
+
+  by_date: dict[str, dict[str, dict[str, Any]]] = {}
+  for entry in candidates:
+    log_date = str(entry['date'])
+    status = str(entry['status'])
+    by_date.setdefault(log_date, {}).setdefault(status, entry)
+
+  selected: list[dict[str, Any]] = []
+  segment: list[dict[str, Any]] = []
+
+  def select_segment() -> None:
+    index = 0
+    while index < len(segment):
+      end = index + 1
+      while (end < len(segment) and
+             segment[end]['status'] == segment[index]['status']):
+        end += 1
+      run = segment[index:end]
+      selected.append(run[0])
+      if run[0]['status'] == 'success' and len(run) > 1:
+        selected.append(run[-1])
+      index = end
+
+  for log_date in sorted(by_date):
+    day_entries = by_date[log_date]
+    if set(day_entries) == {'success', 'error'}:
+      select_segment()
+      segment = []
+      selected.extend(day_entries[status]
+                      for status in ('success', 'error'))
+    else:
+      segment.extend(day_entries.values())
+  select_segment()
+  return selected
+
+
 def acquire_logs(raw_root: Path,
                  projects: Iterable[str] | None = None,
                  mode: str = 'key') -> dict[str, Any]:
@@ -321,6 +369,13 @@ def acquire_logs(raw_root: Path,
         if last_success:
           last_success['status'] = 'success'
           entries.insert(0, last_success)
+      candidate_count = len(entries)
+      entries = _select_boundary_entries(entries)
+      report['project_observations'][project].update({
+          'candidate_log_count': candidate_count,
+          'selected_log_count': len(entries),
+          'filtered_log_count': candidate_count - len(entries),
+      })
       seen: set[tuple[str, str]] = set()
       for entry in entries:
         index = entry.get('index', 'last-success')
