@@ -260,6 +260,84 @@ class PreRepairSelectionTest(unittest.TestCase):
       self.assertEqual(metadata['sanitizer'], 'address')
       self.assertEqual(metadata['architecture'], 'x86_64')
 
+  def test_public_metadata_has_canonical_order_without_dependencies(self):
+    entry = {
+        'dependencies': [{
+            'repo': 'internal-only'
+        }],
+        'fixed_state': 'no',
+        'base_image_digest': 'digest',
+        'project': 'fwupd',
+        'last_success_time': '2026-09-18',
+        'language': 'c',
+        'error_time': '2026-09-19',
+        'oss-fuzz_sha': 'oss-fuzz-sha',
+    }
+
+    ordered = pre_repair._ordered_metadata(entry, include_last_success=True)
+
+    self.assertEqual(list(ordered), [
+        'project', 'language', 'error_time', 'last_success_time',
+        'oss-fuzz_sha', 'base_image_digest', 'fixed_state'
+    ])
+    self.assertNotIn('dependencies', ordered)
+
+  def test_reproduction_mismatch_does_not_reject_complete_metadata(self):
+    metadata = {
+        'fuzzing_build_error_log': 'https://example.test/log.txt',
+        'base_image_digest': 'digest',
+        'engine': 'libfuzzer',
+        'sanitizer': 'address',
+        'architecture': 'x86_64',
+        'software_repo_url': 'https://example.test/project.git',
+        'software_sha': 'source-sha',
+        'dependencies': [],
+    }
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      log = root / 'logs' / 'fwupd' / '2026_09_19 error'
+      log.parent.mkdir(parents=True)
+      log.write_text('original failure', encoding='utf-8')
+      workspace = root / 'workspace'
+      workspace.mkdir()
+
+      def copy_checkout(_source, destination):
+        dockerfile = destination / 'projects' / 'fwupd' / 'Dockerfile'
+        dockerfile.parent.mkdir(parents=True)
+        dockerfile.write_text('FROM base@sha256:old\n', encoding='utf-8')
+
+      completed = mock.Mock(returncode=0, stdout='reproduced failure')
+      with mock.patch.object(
+          pre_repair, '_metadata_from_log',
+          return_value=metadata), mock.patch.object(
+              pre_repair, '_copy_oss_fuzz',
+              side_effect=copy_checkout), mock.patch.object(
+                  pre_repair, '_project_language',
+                  return_value='c'), mock.patch.object(
+                      pre_repair, '_run',
+                      return_value=completed), mock.patch.object(
+                          pre_repair,
+                          '_patch_reproduction_dockerfile',
+                          return_value='FROM base\n'), mock.patch.object(
+                              pre_repair,
+                              '_vertex_match',
+                              return_value={
+                                  'matches': False,
+                                  'error_category': 'RC13'
+                              }):
+        entry, evidence = pre_repair._reproduce_one(
+            log, root / 'oss-fuzz', workspace, 'vertex_ai_gemini-3-1-pro', [{
+                'timestamp_utc': '2026-09-18T00:00:00+00:00',
+                'sha': 'oss-fuzz-sha'
+            }])
+
+    self.assertIsNotNone(entry)
+    assert entry is not None
+    self.assertEqual(entry['project'], 'fwupd')
+    self.assertEqual(entry['error_category'], 'RC13')
+    self.assertEqual(evidence['status'], 'accepted_with_reproduction_mismatch')
+
   def test_required_metadata_rejects_empty_values(self):
     entry = {field: 'set' for field in pre_repair.REQUIRED_METADATA}
     entry['engine'] = ''

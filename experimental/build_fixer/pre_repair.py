@@ -50,6 +50,12 @@ LOGGER = logging.getLogger(__name__)
 REQUIRED_METADATA = ('oss-fuzz_sha', 'software_sha', 'base_image_digest',
                      'fuzzing_build_error_log', 'software_repo_url', 'engine',
                      'sanitizer', 'architecture')
+METADATA_FIELD_ORDER = ('project', 'language', 'error_time', 'oss-fuzz_sha',
+                        'fuzzing_build_error_log', 'software_repo_url',
+                        'software_sha', 'engine', 'sanitizer', 'architecture',
+                        'base_image_digest', 'error_category',
+                        'root_cause_commit', 'root_cause_workspace',
+                        'fixed_state')
 LOG_NAME = re.compile(r'^(?P<year>\d{4})_(?P<month>\d{1,2})_(?P<day>\d{1,2})\s+'
                       r'(?P<status>success|error)$')
 COMPILE_CONFIG = re.compile(
@@ -488,6 +494,15 @@ def _metadata_from_log(log_path: Path) -> dict[str, Any]:
   return metadata
 
 
+def _ordered_metadata(entry: dict[str, Any],
+                      include_last_success: bool = False) -> dict[str, Any]:
+  """Returns only public metadata fields in the canonical schema order."""
+  fields = list(METADATA_FIELD_ORDER)
+  if include_last_success:
+    fields.insert(fields.index('oss-fuzz_sha'), 'last_success_time')
+  return {field: entry[field] for field in fields if field in entry}
+
+
 def _project_language(oss_fuzz: Path, project: str) -> str:
   project_yaml = oss_fuzz / 'projects' / project / 'project.yaml'
   if not project_yaml.is_file():
@@ -706,8 +721,8 @@ def _reproduce_one(
 
   The original project cloned source, checked out the historical commits,
   patched the base image/dependencies and built fuzzers.  This function keeps
-  those side effects in a per-log directory and returns metadata only after
-  Vertex verifies that the original and reproduced errors match.
+  those side effects in a per-log directory.  Vertex comparison is retained
+  as diagnostic evidence but does not gate otherwise complete metadata.
   """
   parsed = parse_log_name(log_path)
   assert parsed is not None
@@ -723,12 +738,16 @@ def _reproduce_one(
     parsed_success = parse_log_name(candidate)
     if parsed_success and parsed_success.log_date < parsed.log_date:
       prior_success = max(prior_success, parsed_success.log_date.isoformat())
-  evidence['original_metadata'] = {
-      'project': project,
-      'error_time': parsed.log_date.isoformat(),
-      'last_success_time': prior_success,
-      **metadata,
-  }
+  public_log_metadata = dict(metadata)
+  public_log_metadata.pop('dependencies', None)
+  evidence['original_metadata'] = _ordered_metadata(
+      {
+          'project': project,
+          'error_time': parsed.log_date.isoformat(),
+          'last_success_time': prior_success,
+          **public_log_metadata,
+      },
+      include_last_success=True)
   isolated = workspace / project / parsed.log_date.isoformat() / 'oss-fuzz'
   try:
     _copy_oss_fuzz(oss_fuzz_source, isolated)
@@ -746,8 +765,13 @@ def _reproduce_one(
     if not language:
       raise PreRepairError(
           f'project.yaml unavailable for {project} at {oss_fuzz_sha}')
-    evidence['original_metadata'].update(language=language,
-                                         oss_fuzz_sha=oss_fuzz_sha)
+    evidence['original_metadata'] = _ordered_metadata(
+        {
+            **evidence['original_metadata'],
+            'language': language,
+            'oss_fuzz_sha': oss_fuzz_sha,
+        },
+        include_last_success=True)
     repo_url = str(metadata.get('software_repo_url') or '')
     source_sha = str(metadata.get('software_sha') or '')
     source_dir = workspace / project / parsed.log_date.isoformat() / 'source'
@@ -792,22 +816,20 @@ def _reproduce_one(
                     build_return_code=fuzz.returncode,
                     vertex_verdict=verdict,
                     reproduce_log=str(log_file))
-    if not verdict['matches']:
-      evidence['status'] = 'mismatch'
-      return None, evidence
     extracted_metadata = {}
     for key in REQUIRED_METADATA:
       if key != 'oss-fuzz_sha':
         extracted_metadata[key] = metadata.get(key, '')
-    entry = {
+    entry = _ordered_metadata({
         'project': project,
         'language': language,
         'error_time': parsed.log_date.isoformat(),
         'oss-fuzz_sha': oss_fuzz_sha,
         **extracted_metadata, 'error_category': verdict['error_category'],
         'fixed_state': 'no'
-    }
-    evidence['status'] = 'verified'
+    })
+    evidence['status'] = ('verified' if verdict['matches'] else
+                          'accepted_with_reproduction_mismatch')
     return entry, evidence
   except (PreRepairError, subprocess.TimeoutExpired) as error:
     evidence.update(status='error', error=f'{type(error).__name__}: {error}')
@@ -947,7 +969,7 @@ def run_reproduction_and_extraction(work_dir: str,
         entries.append(entry)
     (root / 'metadata').mkdir()
     original_entries = [
-        item['original_metadata']
+        _ordered_metadata(item['original_metadata'], include_last_success=True)
         for item in evidence
         if 'original_metadata' in item
     ]
@@ -970,10 +992,13 @@ def run_reproduction_and_extraction(work_dir: str,
           entry, sort_keys=False),
                                                               encoding='utf-8')
     if not entries:
-      raise PreRepairError(
-          'no acquired project passed reproducibility and metadata validation')
+      raise PreRepairError('no acquired project passed metadata validation')
+    reproducible_projects = sum(
+        detail.get('vertex_verdict', {}).get('matches') is True
+        for detail in evidence)
     manifest.update(status='completed',
-                    verified_projects=len(entries),
+                    accepted_projects=len(entries),
+                    verified_projects=reproducible_projects,
                     rejected_projects=len(rejected),
                     benchmark_directory=str(benchmark_dir))
   except Exception as error:  # The manifest remains useful for failed runs.
