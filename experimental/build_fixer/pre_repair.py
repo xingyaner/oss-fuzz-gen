@@ -564,6 +564,7 @@ def _copy_oss_fuzz(source: Path, destination: Path) -> None:
   """Copies the OSS-Fuzz checkout into an isolated working directory."""
   if destination.exists():
     shutil.rmtree(destination)
+  destination.parent.mkdir(parents=True, exist_ok=True)
   result = _run(
       ['git', 'clone', '--no-hardlinks',
        str(source),

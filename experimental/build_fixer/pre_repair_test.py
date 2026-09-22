@@ -263,6 +263,17 @@ class PreRepairSelectionTest(unittest.TestCase):
         pre_repair._checkout_for_date(mapping, dt.date(2026, 6, 21)),
         'inside-window')
 
+  def test_copy_oss_fuzz_creates_nested_destination_parent(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      destination = root / 'missing' / 'nested' / 'oss-fuzz'
+      completed = mock.Mock(returncode=0, stdout='false\n')
+      with mock.patch.object(pre_repair, '_run', return_value=completed) as run:
+        pre_repair._copy_oss_fuzz(root / 'source', destination)
+
+      self.assertTrue(destination.parent.is_dir())
+      self.assertEqual(run.call_args_list[0].args[1], destination.parent)
+
 
 if __name__ == '__main__':
   unittest.main()
