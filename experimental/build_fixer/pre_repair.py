@@ -497,7 +497,7 @@ def _metadata_from_log(log_path: Path) -> dict[str, Any]:
 def _ordered_metadata(entry: dict[str, Any],
                       include_last_success: bool = False) -> dict[str, Any]:
   """Returns only public metadata fields in the canonical schema order."""
-  fields = list(METADATA_FIELD_ORDER)
+  fields: list[str] = list(METADATA_FIELD_ORDER)
   if include_last_success:
     fields.insert(fields.index('oss-fuzz_sha'), 'last_success_time')
   return {field: entry[field] for field in fields if field in entry}
