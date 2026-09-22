@@ -14,6 +14,7 @@
 """Unit tests for the deterministic pre-repair safety boundary."""
 
 import datetime as dt
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -266,13 +267,47 @@ class PreRepairSelectionTest(unittest.TestCase):
   def test_copy_oss_fuzz_creates_nested_destination_parent(self):
     with tempfile.TemporaryDirectory() as temp_dir:
       root = Path(temp_dir)
-      destination = root / 'missing' / 'nested' / 'oss-fuzz'
+      absolute_destination = root / 'missing' / 'nested' / 'oss-fuzz'
+      destination = Path(os.path.relpath(absolute_destination, Path.cwd()))
       completed = mock.Mock(returncode=0, stdout='false\n')
       with mock.patch.object(pre_repair, '_run', return_value=completed) as run:
         pre_repair._copy_oss_fuzz(root / 'source', destination)
 
-      self.assertTrue(destination.parent.is_dir())
-      self.assertEqual(run.call_args_list[0].args[1], destination.parent)
+      self.assertTrue(absolute_destination.parent.is_dir())
+      clone_command, clone_cwd = run.call_args_list[0].args[:2]
+      self.assertEqual(Path(clone_command[-1]), absolute_destination)
+      self.assertEqual(clone_cwd, absolute_destination.parent)
+
+  def test_reproduction_workspace_is_temporary_and_cleaned_on_failure(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      log_root = root / 'logs' / 'thrift-cpp'
+      log_root.mkdir(parents=True)
+      (log_root / '2026_09_16 error').touch()
+      observed_workspace = None
+
+      def fail_mapping(_source, workspace, _start, _end):
+        nonlocal observed_workspace
+        observed_workspace = workspace
+        self.assertFalse(str(workspace).startswith(str(root / 'pre_repair')))
+        raise pre_repair.PreRepairError('mapping failed')
+
+      with mock.patch.object(pre_repair,
+                             'build_commit_mapping',
+                             side_effect=fail_mapping), self.assertRaises(
+                                 pre_repair.PreRepairError):
+        pre_repair.run_reproduction_and_extraction(str(root),
+                                                   str(root / 'oss-fuzz'),
+                                                   'vertex_ai_gemini-3-1-pro',
+                                                   str(root / 'logs'),
+                                                   ['thrift-cpp'],
+                                                   dt.date(2026, 9, 22))
+
+      self.assertIsNotNone(observed_workspace)
+      assert observed_workspace is not None
+      self.assertFalse(observed_workspace.exists())
+      self.assertFalse(
+          (root / 'pre_repair' / 'reproduction_workspace').exists())
 
 
 if __name__ == '__main__':

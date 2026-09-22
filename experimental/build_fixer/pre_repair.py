@@ -31,6 +31,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import urllib.request
 from collections import defaultdict, deque
 from pathlib import Path
@@ -562,6 +563,8 @@ def _checkout_for_date(commit_mapping: Iterable[dict[str, str]],
 
 def _copy_oss_fuzz(source: Path, destination: Path) -> None:
   """Copies the OSS-Fuzz checkout into an isolated working directory."""
+  source = source.resolve()
+  destination = destination.resolve()
   if destination.exists():
     shutil.rmtree(destination)
   destination.parent.mkdir(parents=True, exist_ok=True)
@@ -897,40 +900,42 @@ def run_reproduction_and_extraction(work_dir: str,
     entries: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
-    reproduction_workspace = root / 'reproduction_workspace'
-    commit_mapping = build_commit_mapping(Path(oss_fuzz_source),
-                                          reproduction_workspace, start, today)
-    (root / 'oss_fuzz_commit_mapping.json').write_text(json.dumps(
-        {
-            'window_start': start.isoformat(),
-            'window_end': today.isoformat(),
-            'commits': commit_mapping,
-        },
-        indent=2) + '\n',
-                                                       encoding='utf-8')
-    manifest['commit_mapping_entry_count'] = len(commit_mapping)
-    for log_path in sorted(filtered_logs.glob('*/* error')):
-      entry, detail = _reproduce_one(log_path, Path(oss_fuzz_source),
-                                     reproduction_workspace, model,
-                                     commit_mapping)
-      evidence.append(detail)
-      if entry is None:
-        rejected.append({
-            'project': log_path.parent.name,
-            'log': str(log_path),
-            'reason': detail.get('error', detail['status'])
-        })
-        continue
-      missing = _valid_entry(entry)
-      if missing:
-        rejected.append({
-            'project': entry.get('project', ''),
-            'reason': 'missing required metadata',
-            'missing': missing,
-            'entry': entry
-        })
-        continue
-      entries.append(entry)
+    with tempfile.TemporaryDirectory(prefix='oss-fuzz-gen-pre-repair-') as temp:
+      reproduction_workspace = Path(temp)
+      commit_mapping = build_commit_mapping(Path(oss_fuzz_source),
+                                            reproduction_workspace, start,
+                                            today)
+      (root / 'oss_fuzz_commit_mapping.json').write_text(json.dumps(
+          {
+              'window_start': start.isoformat(),
+              'window_end': today.isoformat(),
+              'commits': commit_mapping,
+          },
+          indent=2) + '\n',
+                                                         encoding='utf-8')
+      manifest['commit_mapping_entry_count'] = len(commit_mapping)
+      for log_path in sorted(filtered_logs.glob('*/* error')):
+        entry, detail = _reproduce_one(log_path, Path(oss_fuzz_source),
+                                       reproduction_workspace, model,
+                                       commit_mapping)
+        evidence.append(detail)
+        if entry is None:
+          rejected.append({
+              'project': log_path.parent.name,
+              'log': str(log_path),
+              'reason': detail.get('error', detail['status'])
+          })
+          continue
+        missing = _valid_entry(entry)
+        if missing:
+          rejected.append({
+              'project': entry.get('project', ''),
+              'reason': 'missing required metadata',
+              'missing': missing,
+              'entry': entry
+          })
+          continue
+        entries.append(entry)
     (root / 'metadata').mkdir()
     original_entries = [
         item['original_metadata']
