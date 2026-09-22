@@ -290,8 +290,8 @@ def parse_args() -> argparse.Namespace:
       action='store_true',
       default=False,
       help=('Runs the opt-in predecessor: acquire recent OSS-Fuzz build logs, '
-            'reproduce and validate them with Vertex AI, then generate repair '
-            'metadata. This replaces the static repair benchmark inputs.'))
+            'extract repair metadata, then generate benchmark inputs. This '
+            'replaces the static repair benchmark inputs.'))
   parser.add_argument(
       '--fix-build-acquire-logs',
       action='store_true',
@@ -302,8 +302,15 @@ def parse_args() -> argparse.Namespace:
       '--fix-build-reproduce-and-extract',
       action='store_true',
       default=False,
-      help=('Reproduces selected acquired logs with Vertex AI and writes '
-            'validated repair metadata and benchmark YAML files.'))
+      help=('Extracts repair metadata from selected acquired logs and writes '
+            'benchmark YAML files. Historical build reproduction is opt-in.'))
+  parser.add_argument(
+      '--pre-repair-verify-reproduction',
+      action='store_true',
+      default=False,
+      help=('Also performs the expensive historical build reproduction and '
+            'records Vertex comparison evidence. This never gates complete '
+            'metadata.'))
   parser.add_argument('--pre-repair-log-dir',
                       type=str,
                       default='',
@@ -390,7 +397,11 @@ def parse_args() -> argparse.Namespace:
   if args.fix_build_reproduce_and_extract:
     assert args.model.lower().startswith('vertex_ai_'), (
         '--fix-build-reproduce-and-extract requires a Vertex AI model '
-        'because the reproduction verifier uses Vertex ADC.')
+        'because the error classifier uses Vertex ADC.')
+  if args.pre_repair_verify_reproduction:
+    assert args.fix_build_reproduce_and_extract, (
+        '--pre-repair-verify-reproduction requires '
+        '--fix-build-reproduce-and-extract.')
   if args.pre_repair_log_dir:
     assert args.fix_build_reproduce_and_extract, (
         '--pre-repair-log-dir requires --fix-build-reproduce-and-extract.')
@@ -739,8 +750,12 @@ def main() -> int:
     try:
       generated_dir = str(
           pre_repair.run_reproduction_and_extraction(
-              args.work_dir, oss_fuzz_checkout.OSS_FUZZ_DIR, args.model,
-              log_directory, args.pre_repair_project))
+              args.work_dir,
+              oss_fuzz_checkout.OSS_FUZZ_DIR,
+              args.model,
+              log_directory,
+              args.pre_repair_project,
+              verify_reproduction=args.pre_repair_verify_reproduction))
     except Exception as error:
       logger.error('Pre-repair reproduction and extraction failed: %s', error)
       traceback.print_exc()

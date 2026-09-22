@@ -338,6 +338,44 @@ class PreRepairSelectionTest(unittest.TestCase):
     self.assertEqual(entry['error_category'], 'RC13')
     self.assertEqual(evidence['status'], 'accepted_with_reproduction_mismatch')
 
+  def test_fast_extraction_accepts_metadata_without_build_reproduction(self):
+    metadata = {
+        'fuzzing_build_error_log': 'https://example.test/log.txt',
+        'base_image_digest': 'digest',
+        'engine': 'libfuzzer',
+        'sanitizer': 'address',
+        'architecture': 'x86_64',
+        'software_repo_url': 'https://example.test/project.git',
+        'software_sha': 'source-sha',
+        'dependencies': [],
+    }
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      log = root / 'logs' / 'fwupd' / '2026_09_19 error'
+      log.parent.mkdir(parents=True)
+      log.write_text('original failure', encoding='utf-8')
+      with mock.patch.object(pre_repair,
+                             '_metadata_from_log',
+                             return_value=metadata), mock.patch.object(
+                                 pre_repair,
+                                 '_project_language_at_commit',
+                                 return_value='c'), mock.patch.object(
+                                     pre_repair,
+                                     '_vertex_classify',
+                                     side_effect=RuntimeError('unavailable')):
+        entry, evidence = pre_repair._extract_one(
+            log, root / 'oss-fuzz', 'vertex_ai_gemini-3-1-pro', [{
+                'timestamp_utc': '2026-09-18T00:00:00+00:00',
+                'sha': 'oss-fuzz-sha'
+            }])
+
+    self.assertIsNotNone(entry)
+    assert entry is not None
+    self.assertEqual(entry['project'], 'fwupd')
+    self.assertEqual(entry['error_category'], 'RC17')
+    self.assertEqual(evidence['status'], 'metadata_extracted')
+    self.assertIn('RuntimeError: unavailable', evidence['classification_error'])
+
   def test_required_metadata_rejects_empty_values(self):
     entry = {field: 'set' for field in pre_repair.REQUIRED_METADATA}
     entry['engine'] = ''

@@ -713,6 +713,96 @@ def _vertex_match(model: str, original_tail: str,
   return {'matches': parsed['matches'], 'error_category': category}
 
 
+def _vertex_classify(model: str, log_tail: str) -> str:
+  """Classifies one original OSS-Fuzz failure without reproducing it."""
+  from google import genai
+  from google.auth import default
+  _, project_id = default()
+  if not project_id:
+    raise PreRepairError('Vertex ADC did not provide a Google Cloud project')
+  location = (os.getenv('VERTEX_LOCATION') or
+              os.getenv('VERTEX_AI_LOCATIONS', 'global').split(',')[0])
+  client = genai.Client(vertexai=True, project=project_id, location=location)
+  prompt = ('Classify this OSS-Fuzz build failure. Reply only JSON with key '
+            'error_category whose value is RC1..RC25.\n'
+            f'BUILD FAILURE:\n{log_tail[-12000:]}')
+  response = client.models.generate_content(model=_vertex_model_name(model),
+                                            contents=prompt)
+  match = re.search(r'\{.*\}', response.text or '', re.DOTALL)
+  if not match:
+    raise PreRepairError('Vertex error classifier returned non-JSON output')
+  parsed = json.loads(match.group(0))
+  return str(parsed.get('error_category') or 'RC17')
+
+
+def _project_language_at_commit(oss_fuzz: Path, project: str, sha: str) -> str:
+  """Reads a historical project language without changing the checkout."""
+  result = _run(['git', 'show', f'{sha}:projects/{project}/project.yaml'],
+                oss_fuzz)
+  if result.returncode:
+    return ''
+  data = yaml.safe_load(result.stdout) or {}
+  return str(data.get('language') or '')
+
+
+def _extract_one(
+    log_path: Path, oss_fuzz_source: Path, model: str,
+    commit_mapping: Iterable[dict[str, str]]
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+  """Extracts complete repair metadata without rebuilding the project."""
+  parsed = parse_log_name(log_path)
+  assert parsed is not None
+  project = log_path.parent.name
+  evidence: dict[str, Any] = {
+      'project': project,
+      'log': str(log_path),
+      'status': 'extracting'
+  }
+  try:
+    metadata = _metadata_from_log(log_path)
+    prior_success = ''
+    for candidate in log_path.parent.glob('* success'):
+      parsed_success = parse_log_name(candidate)
+      if parsed_success and parsed_success.log_date < parsed.log_date:
+        prior_success = max(prior_success, parsed_success.log_date.isoformat())
+    oss_fuzz_sha = _checkout_for_date(commit_mapping, parsed.log_date)
+    if not oss_fuzz_sha:
+      raise PreRepairError('no OSS-Fuzz commit in the dynamic mapping before '
+                           f'{parsed.log_date}')
+    language = _project_language_at_commit(oss_fuzz_source, project,
+                                           oss_fuzz_sha)
+    if not language:
+      raise PreRepairError(
+          f'project.yaml unavailable for {project} at {oss_fuzz_sha}')
+    public_log_metadata = dict(metadata)
+    public_log_metadata.pop('dependencies', None)
+    evidence['original_metadata'] = _ordered_metadata(
+        {
+            'project': project,
+            'language': language,
+            'error_time': parsed.log_date.isoformat(),
+            'last_success_time': prior_success,
+            'oss_fuzz_sha': oss_fuzz_sha,
+            **public_log_metadata,
+        },
+        include_last_success=True)
+    try:
+      error_category = _vertex_classify(model, _tail(log_path))
+    except Exception as error:  # Classification is advisory in deployment.
+      error_category = 'RC17'
+      evidence['classification_error'] = f'{type(error).__name__}: {error}'
+    entry = _ordered_metadata({
+        **evidence['original_metadata'],
+        'error_category': error_category,
+        'fixed_state': 'no',
+    })
+    evidence['status'] = 'metadata_extracted'
+    return entry, evidence
+  except (PreRepairError, subprocess.TimeoutExpired) as error:
+    evidence.update(status='error', error=f'{type(error).__name__}: {error}')
+    return None, evidence
+
+
 def _reproduce_one(
     log_path: Path, oss_fuzz_source: Path, workspace: Path, model: str,
     commit_mapping: Iterable[dict[str, str]]
@@ -886,8 +976,9 @@ def run_reproduction_and_extraction(work_dir: str,
                                     model: str,
                                     log_directory: str,
                                     projects: Iterable[str] | None = None,
-                                    now: dt.date | None = None) -> Path:
-  """Reproduces selected logs and returns the generated repair benchmarks."""
+                                    now: dt.date | None = None,
+                                    verify_reproduction: bool = False) -> Path:
+  """Extracts metadata, optionally reproducing historical build failures."""
   today = now or dt.datetime.now(dt.timezone.utc).date()
   start = subtract_calendar_months(today)
   root = _pre_repair_root(work_dir)
@@ -909,7 +1000,7 @@ def run_reproduction_and_extraction(work_dir: str,
     if output_path.exists():
       shutil.rmtree(output_path)
   manifest: dict[str, Any] = {
-      'status': 'reproducing',
+      'status': 'extracting',
       'log_directory': str(raw),
       'requested_projects': sorted(set(projects or [])),
       'commit_mapping_window_start': start.isoformat(),
@@ -926,16 +1017,15 @@ def run_reproduction_and_extraction(work_dir: str,
           'requested projects are absent from the log input: ' +
           ', '.join(selection['missing_projects']))
     if not selection['copied_count']:
-      raise PreRepairError('log selection produced no reproducible error logs')
+      raise PreRepairError('log selection produced no eligible error logs')
     entries: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix='oss-fuzz-gen-pre-repair-') as temp:
-      reproduction_workspace = Path(temp)
+      mapping_workspace = Path(temp)
       commit_mapping = build_commit_mapping(Path(oss_fuzz_source),
-                                            reproduction_workspace, start,
-                                            today)
-      prepared_oss_fuzz = reproduction_workspace / 'commit-mapping-oss-fuzz'
+                                            mapping_workspace, start, today)
+      prepared_oss_fuzz = mapping_workspace / 'commit-mapping-oss-fuzz'
       (root / 'oss_fuzz_commit_mapping.json').write_text(json.dumps(
           {
               'window_start': start.isoformat(),
@@ -945,9 +1035,14 @@ def run_reproduction_and_extraction(work_dir: str,
           indent=2) + '\n',
                                                          encoding='utf-8')
       manifest['commit_mapping_entry_count'] = len(commit_mapping)
+      manifest['reproduction_verification_enabled'] = verify_reproduction
       for log_path in sorted(filtered_logs.glob('*/* error')):
-        entry, detail = _reproduce_one(log_path, prepared_oss_fuzz,
-                                       reproduction_workspace, model,
+        if verify_reproduction:
+          entry, detail = _reproduce_one(log_path, prepared_oss_fuzz,
+                                         mapping_workspace, model,
+                                         commit_mapping)
+        else:
+          entry, detail = _extract_one(log_path, prepared_oss_fuzz, model,
                                        commit_mapping)
         evidence.append(detail)
         if entry is None:
