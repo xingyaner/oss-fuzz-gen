@@ -45,6 +45,7 @@ KEY_RECENT_BUILD_COUNT = 7
 BUILD_STATUS_URL = ('https://oss-fuzz-build-logs.storage.googleapis.com/'
                     'status.json')
 BUILD_LOG_ROOT = 'https://oss-fuzz-build-logs.storage.googleapis.com'
+OSS_FUZZ_UPSTREAM_URL = 'https://github.com/google/oss-fuzz.git'
 LOGGER = logging.getLogger(__name__)
 REQUIRED_METADATA = ('oss-fuzz_sha', 'software_sha', 'base_image_digest',
                      'fuzzing_build_error_log', 'software_repo_url', 'engine',
@@ -431,31 +432,27 @@ def _run(command: list[str],
 
 def _metadata_from_log(log_path: Path) -> dict[str, Any]:
   """Ports reproduce_note_fuzz's deterministic log extraction."""
-  first_chunk: list[str] = []
   srcmap: list[str] = []
+  metadata: dict[str, Any] = {'dependencies': []}
   with log_path.open(encoding='utf-8', errors='ignore') as log:
-    for index, line in enumerate(log):
-      if index < 1000:
-        first_chunk.append(line)
+    for line in log:
+      if 'fuzzing_build_error_log' not in metadata:
+        uuid = re.search(r'starting build "([a-f0-9-]+)"', line)
+        if uuid:
+          metadata['fuzzing_build_error_log'] = (
+              f'{BUILD_LOG_ROOT}/log-{uuid.group(1)}.txt')
+      if 'base_image_digest' not in metadata:
+        digest = re.search(r'Digest: sha256:([a-f0-9]{64})', line)
+        if digest:
+          metadata['base_image_digest'] = digest.group(1)
+      if 'engine' not in metadata and 'Starting Step #3 - "compile-' in line:
+        match = COMPILE_CONFIG.search(line)
+        if match:
+          metadata.update(engine=match.group(1),
+                          sanitizer=match.group(2),
+                          architecture=match.group(3))
       if 'Step #2 - "srcmap"' in line:
         srcmap.append(line)
-  content = ''.join(first_chunk)
-  metadata: dict[str, Any] = {'dependencies': []}
-  uuid = re.search(r'starting build "([a-f0-9-]+)"', content)
-  digest = re.search(r'Digest: sha256:([a-f0-9]{64})', content)
-  if uuid:
-    metadata['fuzzing_build_error_log'] = (
-        'https://oss-fuzz-build-logs.storage.googleapis.com/log-' +
-        uuid.group(1) + '.txt')
-  if digest:
-    metadata['base_image_digest'] = digest.group(1)
-  for line in first_chunk:
-    match = COMPILE_CONFIG.search(line)
-    if match:
-      metadata.update(engine=match.group(1),
-                      sanitizer=match.group(2),
-                      architecture=match.group(3))
-      break
   project = log_path.parent.name
   target = f'/src/{project}'
   starts = [index for index, line in enumerate(srcmap) if target in line]
@@ -519,6 +516,32 @@ def build_commit_mapping(oss_fuzz_source: Path, workspace: Path, start: dt.date,
   """
   checkout = workspace / 'commit-mapping-oss-fuzz'
   _copy_oss_fuzz(oss_fuzz_source, checkout)
+  remote = _run(['git', 'remote', 'set-url', 'origin', OSS_FUZZ_UPSTREAM_URL],
+                checkout)
+  if remote.returncode:
+    raise PreRepairError('failed to configure official OSS-Fuzz remote: ' +
+                         remote.stdout[-1000:])
+  fetch = _run([
+      'git', 'fetch', '--force',
+      f'--shallow-since={start.isoformat()}T00:00:00Z', 'origin',
+      '+refs/heads/master:refs/remotes/origin/master'
+  ],
+               checkout,
+               timeout=1800)
+  if fetch.returncode:
+    raise PreRepairError('failed to fetch OSS-Fuzz commit window: ' +
+                         fetch.stdout[-1000:])
+  shallow = _run(['git', 'rev-parse', '--is-shallow-repository'], checkout)
+  if shallow.returncode:
+    raise PreRepairError('failed to inspect OSS-Fuzz checkout history: ' +
+                         shallow.stdout[-1000:])
+  if shallow.stdout.strip() == 'true':
+    anchor_fetch = _run(['git', 'fetch', '--deepen=1', 'origin', 'master'],
+                        checkout,
+                        timeout=600)
+    if anchor_fetch.returncode:
+      raise PreRepairError('failed to fetch OSS-Fuzz mapping anchor: ' +
+                           anchor_fetch.stdout[-1000:])
   range_result = _run([
       'git', 'log', '--format=%cI%x09%H',
       f'--since={start.isoformat()}T00:00:00Z',
@@ -577,21 +600,6 @@ def _copy_oss_fuzz(source: Path, destination: Path) -> None:
   if result.returncode:
     raise PreRepairError(
         f'failed to create isolated oss-fuzz checkout: {result.stdout[-1000:]}')
-  # run_one_experiment normally creates a depth-one checkout. Historical
-  # reproduction needs the three-month commit interval, so unshallow the
-  # isolated copy rather than mutating the experiment's shared checkout.
-  shallow = _run(['git', 'rev-parse', '--is-shallow-repository'],
-                 destination,
-                 timeout=60)
-  if shallow.stdout.strip() == 'true':
-    fetch = _run(['git', 'fetch', '--unshallow', 'origin'],
-                 destination,
-                 timeout=1800)
-  else:
-    fetch = _run(['git', 'fetch', 'origin'], destination, timeout=1800)
-  if fetch.returncode:
-    raise PreRepairError('failed to fetch OSS-Fuzz history: ' +
-                         fetch.stdout[-1000:])
 
 
 def _tail(path: Path, count: int = 30) -> str:
@@ -905,6 +913,7 @@ def run_reproduction_and_extraction(work_dir: str,
       commit_mapping = build_commit_mapping(Path(oss_fuzz_source),
                                             reproduction_workspace, start,
                                             today)
+      prepared_oss_fuzz = reproduction_workspace / 'commit-mapping-oss-fuzz'
       (root / 'oss_fuzz_commit_mapping.json').write_text(json.dumps(
           {
               'window_start': start.isoformat(),
@@ -915,7 +924,7 @@ def run_reproduction_and_extraction(work_dir: str,
                                                          encoding='utf-8')
       manifest['commit_mapping_entry_count'] = len(commit_mapping)
       for log_path in sorted(filtered_logs.glob('*/* error')):
-        entry, detail = _reproduce_one(log_path, Path(oss_fuzz_source),
+        entry, detail = _reproduce_one(log_path, prepared_oss_fuzz,
                                        reproduction_workspace, model,
                                        commit_mapping)
         evidence.append(detail)

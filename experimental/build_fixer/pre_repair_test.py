@@ -241,6 +241,25 @@ class PreRepairSelectionTest(unittest.TestCase):
       self.assertEqual(report['missing_projects'], ['qemu'])
       self.assertEqual(report['copied_count'], 0)
 
+  def test_metadata_streams_compile_config_beyond_first_thousand_lines(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      project_dir = Path(temp_dir) / 'thrift-cpp'
+      project_dir.mkdir()
+      log = project_dir / '2026_09_16 error'
+      lines = [
+          'starting build "build-id"\n',
+          'Digest: sha256:' + ('a' * 64) + '\n',
+          *['padding\n'] * 1500,
+          'Starting Step #3 - "compile-afl-address-x86_64"\n',
+      ]
+      log.write_text(''.join(lines), encoding='utf-8')
+
+      metadata = pre_repair._metadata_from_log(log)
+
+      self.assertEqual(metadata['engine'], 'afl')
+      self.assertEqual(metadata['sanitizer'], 'address')
+      self.assertEqual(metadata['architecture'], 'x86_64')
+
   def test_required_metadata_rejects_empty_values(self):
     entry = {field: 'set' for field in pre_repair.REQUIRED_METADATA}
     entry['engine'] = ''
@@ -263,6 +282,39 @@ class PreRepairSelectionTest(unittest.TestCase):
     self.assertEqual(
         pre_repair._checkout_for_date(mapping, dt.date(2026, 6, 21)),
         'inside-window')
+
+  def test_commit_mapping_fetches_official_window_and_anchor(self):
+
+    def completed(stdout=''):
+      return mock.Mock(returncode=0, stdout=stdout)
+
+    def run(command, _cwd, timeout=7200):
+      del timeout
+      if command[:4] == ['git', 'remote', 'set-url', 'origin']:
+        self.assertEqual(command[4], pre_repair.OSS_FUZZ_UPSTREAM_URL)
+        return completed()
+      if '--shallow-since=2026-06-22T00:00:00Z' in command:
+        return completed()
+      if command == ['git', 'rev-parse', '--is-shallow-repository']:
+        return completed('true\n')
+      if '--deepen=1' in command:
+        return completed()
+      if any(item.startswith('--since=') for item in command):
+        return completed('2026-09-16T01:00:00+00:00\tinside\n')
+      if any(item.startswith('--before=') for item in command):
+        return completed('2026-06-21T23:00:00+00:00\tanchor\n')
+      self.fail(f'unexpected command: {command}')
+
+    with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+        pre_repair, '_copy_oss_fuzz'), mock.patch.object(pre_repair,
+                                                         '_run',
+                                                         side_effect=run):
+      mapping = pre_repair.build_commit_mapping(
+          Path(temp_dir) / 'source',
+          Path(temp_dir) / 'workspace', dt.date(2026, 6, 22),
+          dt.date(2026, 9, 22))
+
+    self.assertEqual([item['sha'] for item in mapping], ['anchor', 'inside'])
 
   def test_copy_oss_fuzz_creates_nested_destination_parent(self):
     with tempfile.TemporaryDirectory() as temp_dir:
