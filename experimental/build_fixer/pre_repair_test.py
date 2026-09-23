@@ -282,6 +282,10 @@ class PreRepairSelectionTest(unittest.TestCase):
     ])
     self.assertNotIn('dependencies', ordered)
 
+  def test_public_metadata_rejects_unknown_field_alias(self):
+    with self.assertRaisesRegex(pre_repair.PreRepairError, 'oss_fuzz_sha'):
+      pre_repair._ordered_metadata({'oss_fuzz_sha': 'wrong-alias'})
+
   def test_reproduction_mismatch_does_not_reject_complete_metadata(self):
     metadata = {
         'fuzzing_build_error_log': 'https://example.test/log.txt',
@@ -335,6 +339,7 @@ class PreRepairSelectionTest(unittest.TestCase):
     self.assertIsNotNone(entry)
     assert entry is not None
     self.assertEqual(entry['project'], 'fwupd')
+    self.assertEqual(entry['oss-fuzz_sha'], 'oss-fuzz-sha')
     self.assertEqual(entry['error_category'], 'RC13')
     self.assertEqual(evidence['status'], 'accepted_with_reproduction_mismatch')
 
@@ -372,6 +377,7 @@ class PreRepairSelectionTest(unittest.TestCase):
     self.assertIsNotNone(entry)
     assert entry is not None
     self.assertEqual(entry['project'], 'fwupd')
+    self.assertEqual(entry['oss-fuzz_sha'], 'oss-fuzz-sha')
     self.assertEqual(entry['error_category'], 'RC17')
     self.assertEqual(evidence['status'], 'metadata_extracted')
     self.assertIn('RuntimeError: unavailable', evidence['classification_error'])

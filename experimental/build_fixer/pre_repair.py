@@ -47,10 +47,11 @@ BUILD_STATUS_URL = ('https://oss-fuzz-build-logs.storage.googleapis.com/'
 BUILD_LOG_ROOT = 'https://oss-fuzz-build-logs.storage.googleapis.com'
 OSS_FUZZ_UPSTREAM_URL = 'https://github.com/google/oss-fuzz.git'
 LOGGER = logging.getLogger(__name__)
-REQUIRED_METADATA = ('oss-fuzz_sha', 'software_sha', 'base_image_digest',
+OSS_FUZZ_SHA_FIELD = 'oss-fuzz_sha'
+REQUIRED_METADATA = (OSS_FUZZ_SHA_FIELD, 'software_sha', 'base_image_digest',
                      'fuzzing_build_error_log', 'software_repo_url', 'engine',
                      'sanitizer', 'architecture')
-METADATA_FIELD_ORDER = ('project', 'language', 'error_time', 'oss-fuzz_sha',
+METADATA_FIELD_ORDER = ('project', 'language', 'error_time', OSS_FUZZ_SHA_FIELD,
                         'fuzzing_build_error_log', 'software_repo_url',
                         'software_sha', 'engine', 'sanitizer', 'architecture',
                         'base_image_digest', 'error_category',
@@ -499,7 +500,11 @@ def _ordered_metadata(entry: dict[str, Any],
   """Returns only public metadata fields in the canonical schema order."""
   fields: list[str] = list(METADATA_FIELD_ORDER)
   if include_last_success:
-    fields.insert(fields.index('oss-fuzz_sha'), 'last_success_time')
+    fields.insert(fields.index(OSS_FUZZ_SHA_FIELD), 'last_success_time')
+  unexpected = set(entry) - set(fields) - {'dependencies'}
+  if unexpected:
+    raise PreRepairError('unsupported public metadata fields: ' +
+                         ', '.join(sorted(unexpected)))
   return {field: entry[field] for field in fields if field in entry}
 
 
@@ -782,7 +787,7 @@ def _extract_one(
             'language': language,
             'error_time': parsed.log_date.isoformat(),
             'last_success_time': prior_success,
-            'oss_fuzz_sha': oss_fuzz_sha,
+            OSS_FUZZ_SHA_FIELD: oss_fuzz_sha,
             **public_log_metadata,
         },
         include_last_success=True)
@@ -791,8 +796,10 @@ def _extract_one(
     except Exception as error:  # Classification is advisory in deployment.
       error_category = 'RC17'
       evidence['classification_error'] = f'{type(error).__name__}: {error}'
+    final_metadata = dict(evidence['original_metadata'])
+    final_metadata.pop('last_success_time', None)
     entry = _ordered_metadata({
-        **evidence['original_metadata'],
+        **final_metadata,
         'error_category': error_category,
         'fixed_state': 'no',
     })
@@ -859,7 +866,7 @@ def _reproduce_one(
         {
             **evidence['original_metadata'],
             'language': language,
-            'oss_fuzz_sha': oss_fuzz_sha,
+            OSS_FUZZ_SHA_FIELD: oss_fuzz_sha,
         },
         include_last_success=True)
     repo_url = str(metadata.get('software_repo_url') or '')
@@ -908,13 +915,13 @@ def _reproduce_one(
                     reproduce_log=str(log_file))
     extracted_metadata = {}
     for key in REQUIRED_METADATA:
-      if key != 'oss-fuzz_sha':
+      if key != OSS_FUZZ_SHA_FIELD:
         extracted_metadata[key] = metadata.get(key, '')
     entry = _ordered_metadata({
         'project': project,
         'language': language,
         'error_time': parsed.log_date.isoformat(),
-        'oss-fuzz_sha': oss_fuzz_sha,
+        OSS_FUZZ_SHA_FIELD: oss_fuzz_sha,
         **extracted_metadata, 'error_category': verdict['error_category'],
         'fixed_state': 'no'
     })
