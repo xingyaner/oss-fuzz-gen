@@ -335,7 +335,7 @@ def acquire_logs(raw_root: Path,
   target_projects = requested_projects or failure_projects
   report: dict[str, Any] = {
       'mode': mode,
-      'failure_projects': failure_projects,
+      'failure_project_count': len(failure_projects),
       'requested_projects': requested_projects,
       'selected_projects': [],
       'skipped_projects': {},
@@ -589,8 +589,8 @@ def build_commit_mapping(oss_fuzz_source: Path, workspace: Path, start: dt.date,
   return commits
 
 
-def _checkout_for_date(commit_mapping: Iterable[dict[str, str]],
-                       error_date: dt.date) -> str:
+def _commit_for_date(commit_mapping: Iterable[dict[str, str]],
+                     error_date: dt.date) -> dict[str, str] | None:
   """Returns the latest mapped commit strictly before the log's error date."""
   candidates: list[dict[str, str]] = []
   for item in commit_mapping:
@@ -601,7 +601,14 @@ def _checkout_for_date(commit_mapping: Iterable[dict[str, str]],
       continue
     if commit_date < error_date:
       candidates.append(item)
-  return candidates[-1]['sha'] if candidates else ''
+  return candidates[-1] if candidates else None
+
+
+def _checkout_for_date(commit_mapping: Iterable[dict[str, str]],
+                       error_date: dt.date) -> str:
+  """Returns the SHA for the historical commit selected for an error date."""
+  commit = _commit_for_date(commit_mapping, error_date)
+  return commit['sha'] if commit else ''
 
 
 def _copy_oss_fuzz(source: Path, destination: Path) -> None:
@@ -770,10 +777,11 @@ def _extract_one(
       parsed_success = parse_log_name(candidate)
       if parsed_success and parsed_success.log_date < parsed.log_date:
         prior_success = max(prior_success, parsed_success.log_date.isoformat())
-    oss_fuzz_sha = _checkout_for_date(commit_mapping, parsed.log_date)
-    if not oss_fuzz_sha:
+    selected_commit = _commit_for_date(commit_mapping, parsed.log_date)
+    if not selected_commit:
       raise PreRepairError('no OSS-Fuzz commit in the dynamic mapping before '
                            f'{parsed.log_date}')
+    oss_fuzz_sha = selected_commit['sha']
     language = _project_language_at_commit(oss_fuzz_source, project,
                                            oss_fuzz_sha)
     if not language:
@@ -791,6 +799,9 @@ def _extract_one(
             **public_log_metadata,
         },
         include_last_success=True)
+    evidence.update(
+        oss_fuzz_commit_timestamp_utc=selected_commit['timestamp_utc'],
+        oss_fuzz_selection_rule='latest commit strictly before error date')
     try:
       error_category = _vertex_classify(model, _tail(log_path))
     except Exception as error:  # Classification is advisory in deployment.
@@ -848,10 +859,11 @@ def _reproduce_one(
   isolated = workspace / project / parsed.log_date.isoformat() / 'oss-fuzz'
   try:
     _copy_oss_fuzz(oss_fuzz_source, isolated)
-    oss_fuzz_sha = _checkout_for_date(commit_mapping, parsed.log_date)
-    if not oss_fuzz_sha:
+    selected_commit = _commit_for_date(commit_mapping, parsed.log_date)
+    if not selected_commit:
       raise PreRepairError('no OSS-Fuzz commit in the dynamic mapping before '
                            f'{parsed.log_date}')
+    oss_fuzz_sha = selected_commit['sha']
     checkout = _run(['git', 'checkout', '--detach', oss_fuzz_sha],
                     isolated,
                     timeout=300)
@@ -869,6 +881,9 @@ def _reproduce_one(
             OSS_FUZZ_SHA_FIELD: oss_fuzz_sha,
         },
         include_last_success=True)
+    evidence.update(
+        oss_fuzz_commit_timestamp_utc=selected_commit['timestamp_utc'],
+        oss_fuzz_selection_rule='latest commit strictly before error date')
     repo_url = str(metadata.get('software_repo_url') or '')
     source_sha = str(metadata.get('software_sha') or '')
     source_dir = workspace / project / parsed.log_date.isoformat() / 'source'
@@ -1085,8 +1100,10 @@ def run_reproduction_and_extraction(work_dir: str,
     (root / 'metadata' / 'rejected.yaml').write_text(yaml.safe_dump(
         rejected, sort_keys=False),
                                                      encoding='utf-8')
-    (root / 'reproduction-evidence.json').write_text(
-        json.dumps(evidence, indent=2) + '\n', encoding='utf-8')
+    evidence_name = ('reproduction-evidence.json'
+                     if verify_reproduction else 'extraction-evidence.json')
+    (root / evidence_name).write_text(json.dumps(evidence, indent=2) + '\n',
+                                      encoding='utf-8')
     benchmark_dir = root / 'benchmarks'
     benchmark_dir.mkdir()
     for entry in entries:
@@ -1095,14 +1112,19 @@ def run_reproduction_and_extraction(work_dir: str,
                                                               encoding='utf-8')
     if not entries:
       raise PreRepairError('no acquired project passed metadata validation')
-    reproducible_projects = sum(
-        detail.get('vertex_verdict', {}).get('matches') is True
-        for detail in evidence)
-    manifest.update(status='completed',
-                    accepted_projects=len(entries),
-                    verified_projects=reproducible_projects,
-                    rejected_projects=len(rejected),
-                    benchmark_directory=str(benchmark_dir))
+    manifest.update(
+        status='completed',
+        accepted_projects=len(entries),
+        metadata_extracted_projects=len(entries),
+        rejected_projects=len(rejected),
+        benchmark_directory=str(benchmark_dir),
+        evidence_path=str(root / evidence_name),
+        reproduction_verification_status=('completed' if verify_reproduction
+                                          else 'not_requested'))
+    if verify_reproduction:
+      manifest['verified_projects'] = sum(
+          detail.get('vertex_verdict', {}).get('matches') is True
+          for detail in evidence)
   except Exception as error:  # The manifest remains useful for failed runs.
     manifest.update(status='failed',
                     errors=[f'{type(error).__name__}: {error}'])

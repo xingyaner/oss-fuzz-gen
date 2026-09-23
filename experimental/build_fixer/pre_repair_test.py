@@ -72,6 +72,8 @@ class PreRepairSelectionTest(unittest.TestCase):
                                                   '_download') as download:
       report = pre_repair.acquire_logs(Path(temp_dir), ['airflow'], 'all')
     self.assertEqual(len(report['downloaded']), 2)
+    self.assertEqual(report['failure_project_count'], 1)
+    self.assertNotIn('failure_projects', report)
     self.assertEqual({call.args[0] for call in download.call_args_list}, {
         pre_repair.BUILD_LOG_ROOT + '/log-failure-id.txt',
         pre_repair.BUILD_LOG_ROOT + '/log-success-id.txt'
@@ -380,6 +382,10 @@ class PreRepairSelectionTest(unittest.TestCase):
     self.assertEqual(entry['oss-fuzz_sha'], 'oss-fuzz-sha')
     self.assertEqual(entry['error_category'], 'RC17')
     self.assertEqual(evidence['status'], 'metadata_extracted')
+    self.assertEqual(evidence['oss_fuzz_commit_timestamp_utc'],
+                     '2026-09-18T00:00:00+00:00')
+    self.assertEqual(evidence['oss_fuzz_selection_rule'],
+                     'latest commit strictly before error date')
     self.assertIn('RuntimeError: unavailable', evidence['classification_error'])
 
   def test_required_metadata_rejects_empty_values(self):
@@ -404,6 +410,8 @@ class PreRepairSelectionTest(unittest.TestCase):
     self.assertEqual(
         pre_repair._checkout_for_date(mapping, dt.date(2026, 6, 21)),
         'inside-window')
+    self.assertEqual(pre_repair._commit_for_date(mapping, dt.date(2026, 6, 21)),
+                     mapping[1])
 
   def test_commit_mapping_fetches_official_window_and_anchor(self):
 
