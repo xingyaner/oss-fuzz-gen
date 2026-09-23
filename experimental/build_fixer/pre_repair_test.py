@@ -20,6 +20,8 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import yaml
+
 from experimental.build_fixer import pre_repair
 
 
@@ -78,6 +80,108 @@ class PreRepairSelectionTest(unittest.TestCase):
         pre_repair.BUILD_LOG_ROOT + '/log-failure-id.txt',
         pre_repair.BUILD_LOG_ROOT + '/log-success-id.txt'
     })
+
+  def test_acquisition_skips_blacklisted_project_and_continues(self):
+    failure = {
+        'history': [{
+            'build_id': 'failure-id',
+            'finish_time': '2026-09-21T06:20:11Z',
+            'success': False
+        }]
+    }
+    statuses = [{'name': 'tint', **failure}, {'name': 'airflow', **failure}]
+    with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+        pre_repair, '_status_projects',
+        return_value=statuses), mock.patch.object(pre_repair,
+                                                  '_download') as download:
+      report = pre_repair.acquire_logs(Path(temp_dir), ['tint', 'airflow'],
+                                       'all')
+
+    self.assertEqual(report['skipped_projects']['tint'],
+                     pre_repair.BLACKLIST_REASON)
+    self.assertEqual(report['selected_projects'], ['airflow'])
+    self.assertEqual(download.call_count, 1)
+
+  def test_acquisition_auto_blacklists_stale_project_and_continues(self):
+    statuses = [{
+        'name':
+            'stale-project',
+        'history': [{
+            'build_id': 'stale-failure',
+            'finish_time': '2026-08-22T06:20:11Z',
+            'success': False,
+        }],
+    }, {
+        'name':
+            'airflow',
+        'history': [{
+            'build_id': 'fresh-failure',
+            'finish_time': '2026-09-22T06:20:11Z',
+            'success': False,
+        }],
+    }]
+    with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+        pre_repair, '_status_projects',
+        return_value=statuses), mock.patch.object(pre_repair,
+                                                  '_download') as download:
+      report = pre_repair.acquire_logs(Path(temp_dir),
+                                       ['stale-project', 'airflow'],
+                                       'all',
+                                       now=dt.date(2026, 9, 23))
+
+    self.assertEqual(report['skipped_projects']['stale-project'],
+                     pre_repair.AUTO_BLACKLIST_REASON)
+    self.assertEqual(report['automatic_blacklist_candidates'], [{
+        'project': 'stale-project',
+        'latest_log_date': '2026-08-22',
+        'threshold_date': '2026-08-23',
+    }])
+    self.assertEqual(report['selected_projects'], ['airflow'])
+    self.assertEqual(download.call_count, 1)
+
+  def test_auto_blacklist_keeps_exact_one_calendar_month_boundary(self):
+    status = {
+        'name':
+            'airflow',
+        'history': [{
+            'build_id': 'boundary-failure',
+            'finish_time': '2026-08-23T06:20:11Z',
+            'success': False,
+        }],
+    }
+    with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+        pre_repair, '_status_projects',
+        return_value=[status]), mock.patch.object(pre_repair, '_download'):
+      report = pre_repair.acquire_logs(Path(temp_dir), ['airflow'],
+                                       'all',
+                                       now=dt.date(2026, 9, 23))
+
+    self.assertEqual(report['automatic_blacklist_candidates'], [])
+    self.assertEqual(report['selected_projects'], ['airflow'])
+
+  def test_acquisition_writes_blacklist_suggestions_when_all_stale(self):
+    status = {
+        'name':
+            'stale-project',
+        'history': [{
+            'build_id': 'stale-failure',
+            'finish_time': '2026-08-22T06:20:11Z',
+            'success': False,
+        }],
+    }
+    with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+        pre_repair, '_status_projects', return_value=[status]):
+      with self.assertRaises(pre_repair.PreRepairError):
+        pre_repair.run_log_acquisition(temp_dir, ['stale-project'],
+                                       'all',
+                                       now=dt.date(2026, 9, 23))
+      suggestions = yaml.safe_load(
+          (Path(temp_dir) / 'pre_repair' /
+           pre_repair.BLACKLIST_SUGGESTIONS_FILE).read_text(encoding='utf-8'))
+
+    self.assertTrue(suggestions['manual_git_commit_required'])
+    self.assertEqual(suggestions['threshold_date'], '2026-08-23')
+    self.assertEqual(suggestions['projects'][0]['project'], 'stale-project')
 
   def test_all_mode_filters_continuous_errors_before_download(self):
     history = [{
@@ -231,6 +335,21 @@ class PreRepairSelectionTest(unittest.TestCase):
           (destination / 'cups-filters' / '2026_6_20 error').is_file())
       self.assertFalse((destination / 'qemu').exists())
       self.assertEqual(report['copied_count'], 1)
+
+  def test_log_filter_skips_blacklisted_project(self):
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      source = root / 'source'
+      for project in ('tint', 'cups-filters'):
+        project_dir = source / project
+        project_dir.mkdir(parents=True)
+        (project_dir / '2026_6_20 error').touch()
+
+      report = pre_repair.filter_log_tree(source, root / 'destination')
+
+    self.assertEqual(report['copied_count'], 1)
+    self.assertEqual(report['skipped_projects']['tint'],
+                     pre_repair.BLACKLIST_REASON)
 
   def test_project_filter_reports_missing_requested_projects(self):
     with tempfile.TemporaryDirectory() as temp_dir:

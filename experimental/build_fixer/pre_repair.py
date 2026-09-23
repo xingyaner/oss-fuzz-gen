@@ -47,6 +47,15 @@ BUILD_STATUS_URL = ('https://oss-fuzz-build-logs.storage.googleapis.com/'
 BUILD_LOG_ROOT = 'https://oss-fuzz-build-logs.storage.googleapis.com'
 OSS_FUZZ_UPSTREAM_URL = 'https://github.com/google/oss-fuzz.git'
 LOGGER = logging.getLogger(__name__)
+PRE_REPAIR_PROJECT_BLACKLIST = frozenset({
+    'commons-validator',
+    'libmediaart',
+    'protoreflect',
+    'tint',
+})
+BLACKLIST_REASON = 'project is blacklisted from pre-repair'
+AUTO_BLACKLIST_REASON = 'latest build log is older than one calendar month'
+BLACKLIST_SUGGESTIONS_FILE = 'pre_repair_blacklist.yaml'
 OSS_FUZZ_SHA_FIELD = 'oss-fuzz_sha'
 REQUIRED_METADATA = (OSS_FUZZ_SHA_FIELD, 'software_sha', 'base_image_digest',
                      'fuzzing_build_error_log', 'software_repo_url', 'engine',
@@ -154,11 +163,14 @@ def filter_log_tree(source: Path,
   report: dict[str, Any] = {
       'projects': [],
       'copied_count': 0,
-      'skipped_paths': []
+      'skipped_paths': [],
+      'skipped_projects': {}
   }
   if not source.is_dir():
     raise PreRepairError(f'acquisition did not create log root: {source}')
   selected_projects = set(projects or [])
+  blacklisted_projects = selected_projects & PRE_REPAIR_PROJECT_BLACKLIST
+  selected_projects -= PRE_REPAIR_PROJECT_BLACKLIST
   available_projects = {
       project_dir.name
       for project_dir in source.iterdir()
@@ -170,6 +182,9 @@ def filter_log_tree(source: Path,
       report['skipped_paths'].append(str(project_dir))
       continue
     if selected_projects and project_dir.name not in selected_projects:
+      continue
+    if project_dir.name in PRE_REPAIR_PROJECT_BLACKLIST:
+      report['skipped_projects'][project_dir.name] = BLACKLIST_REASON
       continue
     all_logs: list[LogFile] = []
     for child in sorted(project_dir.iterdir()):
@@ -200,6 +215,8 @@ def filter_log_tree(source: Path,
     report['copied_count'] += len(copied)
   if missing_projects:
     report['missing_projects'] = missing_projects
+  for project in sorted(blacklisted_projects):
+    report['skipped_projects'][project] = BLACKLIST_REASON
   return report
 
 
@@ -234,6 +251,16 @@ def _is_key_project(statuses: Iterable[str]) -> bool:
   """Returns whether recent history identifies a newly failing project."""
   recent = list(statuses)[:KEY_RECENT_BUILD_COUNT]
   return 'success' in recent and 'error' in recent
+
+
+def _latest_log_date(history: Iterable[Any]) -> dt.date | None:
+  """Returns the newest valid build-log date present in status history."""
+  dates = [
+      dt.date.fromisoformat(entry['date'].replace('/', '-'))
+      for index, record in enumerate(history)
+      if (entry := _build_entry(record, index)) is not None
+  ]
+  return max(dates) if dates else None
 
 
 def _build_entry(record: Any, index: int | str) -> dict[str, Any] | None:
@@ -306,7 +333,8 @@ def _select_boundary_entries(
 
 def acquire_logs(raw_root: Path,
                  projects: Iterable[str] | None = None,
-                 mode: str = 'key') -> dict[str, Any]:
+                 mode: str = 'key',
+                 now: dt.date | None = None) -> dict[str, Any]:
   """Acquires either recent-transition (key) or all failed-project logs.
 
   Browser/page failures are collected per project and do not silently become
@@ -317,6 +345,8 @@ def acquire_logs(raw_root: Path,
     raise PreRepairError(
         f'unsupported acquisition mode {mode!r}; expected key or all')
   raw_root.mkdir(parents=True, exist_ok=True)
+  today = now or dt.datetime.now(dt.timezone.utc).date()
+  auto_blacklist_threshold = subtract_calendar_months(today, months=1)
   requested_projects = sorted(set(projects or []))
   if not requested_projects:
     LOGGER.warning(
@@ -334,9 +364,15 @@ def acquire_logs(raw_root: Path,
       not bool(item['history'][0].get('success')))
   target_projects = requested_projects or failure_projects
   report: dict[str, Any] = {
-      'mode': mode,
-      'failure_project_count': len(failure_projects),
-      'requested_projects': requested_projects,
+      'mode':
+          mode,
+      'failure_project_count':
+          len(failure_projects),
+      'automatic_blacklist_threshold_date':
+          auto_blacklist_threshold.isoformat(),
+      'automatic_blacklist_candidates': [],
+      'requested_projects':
+          requested_projects,
       'selected_projects': [],
       'skipped_projects': {},
       'downloaded': [],
@@ -346,6 +382,9 @@ def acquire_logs(raw_root: Path,
   }
   for project in target_projects:
     try:
+      if project in PRE_REPAIR_PROJECT_BLACKLIST:
+        report['skipped_projects'][project] = BLACKLIST_REASON
+        continue
       project_status = by_name.get(project)
       if project_status is None:
         report['skipped_projects'][project] = 'not present in status.json'
@@ -356,6 +395,15 @@ def acquire_logs(raw_root: Path,
       raw_history = project_status.get('history')
       if not isinstance(raw_history, list):
         raise PreRepairError('project history is not a list')
+      latest_log_date = _latest_log_date(raw_history)
+      if latest_log_date and latest_log_date < auto_blacklist_threshold:
+        report['automatic_blacklist_candidates'].append({
+            'project': project,
+            'latest_log_date': latest_log_date.isoformat(),
+            'threshold_date': auto_blacklist_threshold.isoformat(),
+        })
+        report['skipped_projects'][project] = AUTO_BLACKLIST_REASON
+        continue
       history = [
           entry for index, record in enumerate(raw_history)
           if (entry := _build_entry(record, index)) is not None
@@ -966,9 +1014,31 @@ def _write_manifest(root: Path, manifest: dict[str, Any]) -> None:
                                       encoding='utf-8')
 
 
+def _write_blacklist_suggestions(root: Path, acquisition: dict[str,
+                                                               Any]) -> None:
+  """Writes run-local candidates for a deliberate static-blacklist update.
+
+  The acquisition path skips stale projects immediately, but the repository's
+  static blacklist remains a reviewed source change.  This artifact makes that
+  distinction explicit and remains available even if every requested project
+  was skipped, causing acquisition to fail for lack of downloadable logs.
+  """
+  payload = {
+      'manual_git_commit_required': True,
+      'rule': ('latest valid OSS-Fuzz build-log date is strictly older than '
+               'one calendar month before the acquisition date'),
+      'threshold_date': acquisition.get('automatic_blacklist_threshold_date'),
+      'projects': acquisition.get('automatic_blacklist_candidates', []),
+  }
+  (root / BLACKLIST_SUGGESTIONS_FILE).write_text(yaml.safe_dump(
+      payload, sort_keys=False),
+                                                 encoding='utf-8')
+
+
 def run_log_acquisition(work_dir: str,
                         projects: Iterable[str] | None = None,
-                        mode: str = 'key') -> Path:
+                        mode: str = 'key',
+                        now: dt.date | None = None) -> Path:
   """Acquires OSS-Fuzz logs and returns the durable acquired-log directory."""
   root = _pre_repair_root(work_dir)
   raw = root / LOG_ROOT_NAME
@@ -976,7 +1046,7 @@ def run_log_acquisition(work_dir: str,
     shutil.rmtree(raw)
   manifest: dict[str, Any] = {'status': 'acquiring', 'errors': []}
   try:
-    manifest['acquisition'] = acquire_logs(raw, projects, mode)
+    manifest['acquisition'] = acquire_logs(raw, projects, mode, now)
     manifest['status'] = 'acquired'
     return raw
   except PreRepairError as error:
@@ -990,6 +1060,9 @@ def run_log_acquisition(work_dir: str,
                     errors=[f'{type(error).__name__}: {error}'])
     raise
   finally:
+    acquisition = manifest.get('acquisition')
+    if isinstance(acquisition, dict):
+      _write_blacklist_suggestions(root, acquisition)
     _write_manifest(root, manifest)
 
 
