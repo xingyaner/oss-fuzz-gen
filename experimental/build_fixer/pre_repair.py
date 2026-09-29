@@ -1108,8 +1108,10 @@ def run_reproduction_and_extraction(work_dir: str,
     selection = filter_log_tree(raw, filtered_logs, projects)
     manifest['selection'] = selection
     if selection.get('missing_projects'):
-      raise PreRepairError(
-          'requested projects are absent from the log input: ' +
+      manifest['unavailable_requested_projects'] = selection['missing_projects']
+      LOGGER.warning(
+          'Requested projects absent from the acquired log input; continuing '
+          'with available projects: %s',
           ', '.join(selection['missing_projects']))
     if not selection['copied_count']:
       raise PreRepairError('log selection produced no eligible error logs')

@@ -14,6 +14,7 @@
 """Unit tests for the deterministic pre-repair safety boundary."""
 
 import datetime as dt
+import json
 import os
 import tempfile
 import unittest
@@ -361,6 +362,49 @@ class PreRepairSelectionTest(unittest.TestCase):
                                           ['qemu'])
       self.assertEqual(report['missing_projects'], ['qemu'])
       self.assertEqual(report['copied_count'], 0)
+
+  def test_extraction_continues_when_one_requested_project_has_no_logs(self):
+    entry = {
+        'project': 'kea',
+        'language': 'c++',
+        'error_time': '2026-09-18',
+        'oss-fuzz_sha': 'oss-fuzz-sha',
+        'fuzzing_build_error_log': 'https://example.test/log.txt',
+        'software_repo_url': 'https://example.test/kea.git',
+        'software_sha': 'source-sha',
+        'engine': 'libfuzzer',
+        'sanitizer': 'address',
+        'architecture': 'x86_64',
+        'base_image_digest': 'digest',
+        'error_category': 'RC1',
+        'fixed_state': 'no',
+    }
+    evidence = {'status': 'metadata_extracted', 'original_metadata': entry}
+    with tempfile.TemporaryDirectory() as temp_dir:
+      root = Path(temp_dir)
+      log = root / 'logs' / 'kea' / '2026_09_18 error'
+      log.parent.mkdir(parents=True)
+      log.touch()
+      mapping = [{
+          'timestamp_utc': '2026-09-17T00:00:00+00:00',
+          'sha': 'oss-fuzz-sha'
+      }]
+      with mock.patch.object(pre_repair,
+                             'build_commit_mapping',
+                             return_value=mapping), mock.patch.object(
+                                 pre_repair,
+                                 '_extract_one',
+                                 return_value=(entry, evidence)):
+        benchmark_dir = pre_repair.run_reproduction_and_extraction(
+            str(root), str(root / 'oss-fuzz'), 'vertex_ai_gemini-3-1-pro',
+            str(root / 'logs'), ['fwupd', 'kea'], dt.date(2026, 9, 23))
+
+      manifest = json.loads(
+          (root / 'pre_repair' / 'manifest.json').read_text(encoding='utf-8'))
+
+      self.assertTrue((benchmark_dir / 'kea.yaml').is_file())
+      self.assertEqual(manifest['status'], 'completed')
+      self.assertEqual(manifest['unavailable_requested_projects'], ['fwupd'])
 
   def test_metadata_streams_compile_config_beyond_first_thousand_lines(self):
     with tempfile.TemporaryDirectory() as temp_dir:
