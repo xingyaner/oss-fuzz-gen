@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -26,6 +27,7 @@ import tempfile
 import time
 import traceback
 import warnings
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
@@ -33,9 +35,11 @@ import agent_tools
 import litellm
 from dotenv import load_dotenv
 
+VERTEX_LITELLM_RETRIES = 0
+
 load_dotenv()
 litellm.request_timeout = 600
-litellm.num_retries = 2
+litellm.num_retries = VERTEX_LITELLM_RETRIES
 litellm.drop_params = True
 
 from functools import wraps
@@ -73,6 +77,107 @@ from google.adk.tools.tool_context import ToolContext
 from google.adk.workflow import BaseNode, Edge, Workflow, node
 from google.genai import types
 
+VERTEX_REQUEST_INTERVAL_SECONDS = 6
+VERTEX_RATE_LIMIT_DELAYS_SECONDS = (30, 60, 120, 240)
+
+
+class VertexRateLimitExhaustedError(Exception):
+  """Raised only after the configured Vertex 429 retries are exhausted."""
+
+
+def _is_vertex_rate_limit_error(error: BaseException) -> bool:
+  """Returns true only for the Vertex quota signals handled by this module."""
+  message = str(error)
+  return (isinstance(error, litellm.exceptions.RateLimitError) or
+          bool(re.search(r'\b429\b', message)) or
+          'RESOURCE_EXHAUSTED' in message)
+
+
+class _VertexRequestLimiter:
+  """Process-local single-flight gate for Vertex LLM requests."""
+
+  def __init__(self):
+    self._request_lock = asyncio.Lock()
+    self._schedule_lock = asyncio.Lock()
+    self._next_request_at = 0.0
+
+  async def _wait_for_request_window(self) -> None:
+    while True:
+      async with self._schedule_lock:
+        now = time.monotonic()
+        delay = self._next_request_at - now
+        if delay <= 0:
+          self._next_request_at = now + VERTEX_REQUEST_INTERVAL_SECONDS
+          return
+      await asyncio.sleep(delay)
+
+  async def impose_cooldown(self, seconds: float) -> None:
+    """Delays every later Vertex request in this agent process."""
+    async with self._schedule_lock:
+      self._next_request_at = max(self._next_request_at,
+                                  time.monotonic() + seconds)
+
+  @asynccontextmanager
+  async def request_slot(self):
+    await self._request_lock.acquire()
+    try:
+      await self._wait_for_request_window()
+      yield
+    finally:
+      self._request_lock.release()
+
+
+VERTEX_REQUEST_LIMITER = _VertexRequestLimiter()
+
+
+class VertexRateLimitedLiteLlm(LiteLlm):
+  """LiteLLM model with process-wide Vertex pacing and 429-only retries."""
+
+  async def generate_content_async(self, llm_request, stream=False):
+    # The factory below constructs this class only for Vertex models. Keep the
+    # condition defensive so a future direct construction cannot throttle a
+    # non-Vertex endpoint.
+    if not _model_uses_vertex_adc(llm_request.model or self.model):
+      async for response in super().generate_content_async(llm_request,
+                                                           stream=stream):
+        yield response
+      return
+
+    for request_attempt in range(len(VERTEX_RATE_LIMIT_DELAYS_SECONDS) + 1):
+      emitted_response = False
+      try:
+        async with VERTEX_REQUEST_LIMITER.request_slot():
+          async for response in super().generate_content_async(llm_request,
+                                                               stream=stream):
+            emitted_response = True
+            yield response
+        return
+      except Exception as error:
+        # Retrying after a partial streamed response can duplicate content or
+        # a tool call, so only retry requests that failed before any response.
+        if (emitted_response or not _is_vertex_rate_limit_error(error) or
+            request_attempt == len(VERTEX_RATE_LIMIT_DELAYS_SECONDS)):
+          if (_is_vertex_rate_limit_error(error) and
+              request_attempt == len(VERTEX_RATE_LIMIT_DELAYS_SECONDS)):
+            raise VertexRateLimitExhaustedError(
+                'Vertex 429 retries exhausted after 5 total requests.'
+            ) from error
+          raise
+
+        base_delay = VERTEX_RATE_LIMIT_DELAYS_SECONDS[request_attempt]
+        delay = base_delay * random.uniform(1.0, 1.2)
+        await VERTEX_REQUEST_LIMITER.impose_cooldown(delay)
+        print('--- [VERTEX 429] Request failed; applying shared cooldown of '
+              f'{delay:.1f}s before retry {request_attempt + 1}/4. ---')
+
+
+def create_llm_model(**kwargs):
+  """Builds the model implementation without changing non-Vertex behavior."""
+  model_name = kwargs.get('model', '')
+  model_class = VertexRateLimitedLiteLlm if _model_uses_vertex_adc(
+      model_name) else LiteLlm
+  return model_class(**kwargs)
+
 
 class StreamTee:
 
@@ -87,6 +192,26 @@ class StreamTee:
 
   def flush(self):
     self.original_stream.flush()
+
+
+class RateLimitRoutingAgent(BaseAgent):
+  """Converts exhausted Vertex quota retries into a workflow route only."""
+  subject_agent: BaseAgent
+
+  async def _run_async_impl(
+      self, context: InvocationContext) -> AsyncGenerator[Event, None]:
+    try:
+      async for event in self.subject_agent.run_async(context):
+        yield event
+    except VertexRateLimitExhaustedError:
+      print(f"--- [VERTEX 429] {self.name} exhausted retries; routing this "
+            "internal round to rate-limit recovery. ---")
+      yield Event(
+          author=self.name,
+          actions=EventActions(
+              state_delta={"rate_limit_exhausted_agent": self.name},
+              route="rate_limit"),
+      )
 
 
 class LoggingWrapperAgent(BaseAgent):
@@ -529,6 +654,7 @@ def _record_llm_error_event(error: Exception, project_name: str,
   message = str(error)
   status_match = re.search(r'\b([45]\d\d)\b', message)
   service_status_match = re.search(r'"status":\s*"([A-Z_]+)"', message)
+  is_rate_limit = _is_vertex_rate_limit_error(error)
   _write_llm_api_event({
       'event_type':
           'error',
@@ -544,9 +670,11 @@ def _record_llm_error_event(error: Exception, project_name: str,
       'error_type':
           type(error).__name__,
       'http_status':
-          int(status_match.group(1)) if status_match else None,
+          429 if is_rate_limit else
+          (int(status_match.group(1)) if status_match else None),
       'service_status':
-          service_status_match.group(1) if service_status_match else '',
+          ('RESOURCE_EXHAUSTED' if is_rate_limit else
+           (service_status_match.group(1) if service_status_match else '')),
   })
 
 
@@ -855,12 +983,12 @@ async def _review_final_archive_with_optimizer(
 
   optimizer = LlmAgent(
       name="patch_optimizer_archive_review_agent",
-      model=LiteLlm(model=MODEL,
-                    api_base=api_base,
-                    api_key=API_KEY,
-                    temperature=0.0,
-                    top_p=0.2,
-                    seed=LLM_SEED),
+      model=create_llm_model(model=MODEL,
+                             api_base=api_base,
+                             api_key=API_KEY,
+                             temperature=0.0,
+                             top_p=0.2,
+                             seed=LLM_SEED),
       instruction=load_instruction_from_file(
           "instructions/patch_optimizer_instruction.txt"),
       tools=[
@@ -1004,12 +1132,12 @@ async def optimize_successful_patch(
   optimization_status = "no_candidate"
   optimizer = LlmAgent(
       name="patch_optimizer_agent",
-      model=LiteLlm(model=MODEL,
-                    api_base=api_base,
-                    api_key=API_KEY,
-                    temperature=0.0,
-                    top_p=0.2,
-                    seed=LLM_SEED),
+      model=create_llm_model(model=MODEL,
+                             api_base=api_base,
+                             api_key=API_KEY,
+                             temperature=0.0,
+                             top_p=0.2,
+                             seed=LLM_SEED),
       instruction=load_instruction_from_file(
           "instructions/patch_optimizer_instruction.txt"),
       tools=[
@@ -1373,12 +1501,12 @@ def initialize_agents(
   # 1. 初始化所有 LlmAgent
   initial_setup_agent = LlmAgent(
       name="initial_setup_agent",
-      model=LiteLlm(model=MODEL,
-                    api_base=api_base,
-                    api_key=API_KEY,
-                    temperature=0.0,
-                    top_p=0.1,
-                    seed=LLM_SEED),
+      model=create_llm_model(model=MODEL,
+                             api_base=api_base,
+                             api_key=API_KEY,
+                             temperature=0.0,
+                             top_p=0.1,
+                             seed=LLM_SEED),
       instruction=load_instruction_from_file(
           "instructions/initial_setup_instruction.txt"),
       tools=[
@@ -1396,12 +1524,12 @@ def initialize_agents(
 
   run_fuzz_and_collect_log_agent = LlmAgent(
       name="run_fuzz_and_collect_log_agent",
-      model=LiteLlm(model=MODEL,
-                    api_base=api_base,
-                    api_key=API_KEY,
-                    temperature=0.0,
-                    top_p=0.1,
-                    seed=LLM_SEED),
+      model=create_llm_model(model=MODEL,
+                             api_base=api_base,
+                             api_key=API_KEY,
+                             temperature=0.0,
+                             top_p=0.1,
+                             seed=LLM_SEED),
       instruction=load_instruction_from_file(
           "instructions/run_fuzz_and_collect_log_instruction.txt"),
       tools=[
@@ -1412,12 +1540,12 @@ def initialize_agents(
 
   decision_agent = LlmAgent(
       name="decision_agent",
-      model=LiteLlm(model=MODEL,
-                    api_base=api_base,
-                    api_key=API_KEY,
-                    temperature=0.0,
-                    top_p=0.1,
-                    seed=LLM_SEED),
+      model=create_llm_model(model=MODEL,
+                             api_base=api_base,
+                             api_key=API_KEY,
+                             temperature=0.0,
+                             top_p=0.1,
+                             seed=LLM_SEED),
       instruction=load_instruction_from_file(
           "instructions/decision_instruction.txt"),
       tools=[read_file_content, exit_loop],
@@ -1426,12 +1554,12 @@ def initialize_agents(
 
   rsmc_agent = LlmAgent(
       name="rsmc_agent",
-      model=LiteLlm(model=MODEL,
-                    api_base=api_base,
-                    api_key=API_KEY,
-                    temperature=0.2,
-                    top_p=0.3,
-                    seed=LLM_SEED),
+      model=create_llm_model(model=MODEL,
+                             api_base=api_base,
+                             api_key=API_KEY,
+                             temperature=0.2,
+                             top_p=0.3,
+                             seed=LLM_SEED),
       instruction=load_instruction_from_file(
           "instructions/rsmc_instruction.txt"),
       tools=[read_file_content, init_or_update_rsmc_ledger, query_trace_ledger],
@@ -1440,12 +1568,12 @@ def initialize_agents(
 
   rollback_agent = LlmAgent(
       name="rollback_agent",
-      model=LiteLlm(model=MODEL,
-                    api_base=api_base,
-                    api_key=API_KEY,
-                    temperature=0.0,
-                    top_p=0.1,
-                    seed=LLM_SEED),
+      model=create_llm_model(model=MODEL,
+                             api_base=api_base,
+                             api_key=API_KEY,
+                             temperature=0.0,
+                             top_p=0.1,
+                             seed=LLM_SEED),
       instruction=load_instruction_from_file(
           "instructions/rollback_instruction.txt"),
       tools=[
@@ -1456,12 +1584,12 @@ def initialize_agents(
 
   commit_finder_agent = LlmAgent(
       name="commit_finder_agent",
-      model=LiteLlm(model=MODEL,
-                    api_base=api_base,
-                    api_key=API_KEY,
-                    temperature=0.0,
-                    top_p=0.1,
-                    seed=LLM_SEED),
+      model=create_llm_model(model=MODEL,
+                             api_base=api_base,
+                             api_key=API_KEY,
+                             temperature=0.0,
+                             top_p=0.1,
+                             seed=LLM_SEED),
       instruction=processed_instruction,
       tools=[
           read_file_content,
@@ -1478,13 +1606,13 @@ def initialize_agents(
 
   prompt_generate_agent = LlmAgent(
       name="prompt_generate_agent",
-      model=LiteLlm(model=MODEL,
-                    api_base=api_base,
-                    api_key=API_KEY,
-                    max_output_tokens=16384,
-                    temperature=0.2,
-                    top_p=0.3,
-                    seed=LLM_SEED),
+      model=create_llm_model(model=MODEL,
+                             api_base=api_base,
+                             api_key=API_KEY,
+                             max_output_tokens=16384,
+                             temperature=0.2,
+                             top_p=0.3,
+                             seed=LLM_SEED),
       instruction=load_instruction_from_file(
           "instructions/prompt_generate_instruction.txt"),
       tools=[
@@ -1503,13 +1631,13 @@ def initialize_agents(
 
   fuzzing_solver_agent = LlmAgent(
       name="fuzzing_solver_agent",
-      model=LiteLlm(model=MODEL,
-                    api_base=api_base,
-                    api_key=API_KEY,
-                    max_output_tokens=8129,
-                    temperature=0.0,
-                    top_p=0.2,
-                    seed=LLM_SEED),
+      model=create_llm_model(model=MODEL,
+                             api_base=api_base,
+                             api_key=API_KEY,
+                             max_output_tokens=8129,
+                             temperature=0.0,
+                             top_p=0.2,
+                             seed=LLM_SEED),
       instruction=load_instruction_from_file(
           "instructions/fuzzing_solver_instruction.txt"),
       tools=[
@@ -1520,12 +1648,12 @@ def initialize_agents(
 
   solution_applier_agent = LlmAgent(
       name="solution_applier_agent",
-      model=LiteLlm(model=MODEL,
-                    api_base=api_base,
-                    api_key=API_KEY,
-                    temperature=0.0,
-                    top_p=0.1,
-                    seed=LLM_SEED),
+      model=create_llm_model(model=MODEL,
+                             api_base=api_base,
+                             api_key=API_KEY,
+                             temperature=0.0,
+                             top_p=0.1,
+                             seed=LLM_SEED),
       instruction=load_instruction_from_file(
           "instructions/solution_applier_instruction.txt"),
       tools=[
@@ -1535,17 +1663,28 @@ def initialize_agents(
       output_key="patch_application_result",
   )
 
-  # 2. 包装节点
-  setup_node = node(initial_setup_agent, name="initial_setup_agent")
-  fuzz_node = node(run_fuzz_and_collect_log_agent,
+  # 2. Wrap only exhausted 429 retries in a routable workflow event. All
+  # other model and tool errors retain their existing propagation behavior.
+  def rate_limit_routable(agent: BaseAgent) -> RateLimitRoutingAgent:
+    return RateLimitRoutingAgent(name=agent.name, subject_agent=agent)
+
+  setup_node = node(rate_limit_routable(initial_setup_agent),
+                    name="initial_setup_agent")
+  fuzz_node = node(rate_limit_routable(run_fuzz_and_collect_log_agent),
                    name="run_fuzz_and_collect_log_agent")
-  decision_node = node(decision_agent, name="decision_agent")
-  rsmc_node = node(rsmc_agent, name="rsmc_agent")
-  rollback_node = node(rollback_agent, name="rollback_agent")
-  finder_node = node(commit_finder_agent, name="commit_finder_agent")
-  prompt_node = node(prompt_generate_agent, name="prompt_generate_agent")
-  solver_node = node(fuzzing_solver_agent, name="fuzzing_solver_agent")
-  applier_node = node(solution_applier_agent, name="solution_applier_agent")
+  decision_node = node(rate_limit_routable(decision_agent),
+                       name="decision_agent")
+  rsmc_node = node(rate_limit_routable(rsmc_agent), name="rsmc_agent")
+  rollback_node = node(rate_limit_routable(rollback_agent),
+                       name="rollback_agent")
+  finder_node = node(rate_limit_routable(commit_finder_agent),
+                     name="commit_finder_agent")
+  prompt_node = node(rate_limit_routable(prompt_generate_agent),
+                     name="prompt_generate_agent")
+  solver_node = node(rate_limit_routable(fuzzing_solver_agent),
+                     name="fuzzing_solver_agent")
+  applier_node = node(rate_limit_routable(solution_applier_agent),
+                      name="solution_applier_agent")
 
   # 3. 路由逻辑 (实现图内自动循环)
   @node(name="router_node")
@@ -1560,7 +1699,32 @@ def initialize_agents(
 
     return Event(route="exit")
 
+  @node(name="rate_limit_recovery_node")
+  async def rate_limit_recovery_node(ctx: Context, node_input: Any):
+    failed_agent = ctx.state.get("rate_limit_exhausted_agent", "unknown")
+    # Initial setup is a prerequisite, not a repair round. Retry it after the
+    # shared cooldown without changing the repair-round counter.
+    if failed_agent == "initial_setup_agent":
+      print("--- [VERTEX 429] Retrying prerequisite setup after cooldown. ---")
+      return Event(route="setup")
+
+    current_round = ctx.state.get("round_id", 0)
+    if current_round < MAX_INTERNAL_ROUNDS:
+      next_round = current_round + 1
+      print("--- [VERTEX 429] Current internal round failed after retry "
+            f"exhaustion; continuing with internal round {next_round}. ---")
+      return Event(route="continue",
+                   state={
+                       "round_id": next_round,
+                       "rate_limit_exhausted_agent": "",
+                   })
+    print("--- [VERTEX 429] Internal round limit reached. ---")
+    return Event(route="exit")
+
   success_node = node(lambda: {"status": "SUCCESS"}, name="success_node")
+  rate_limit_failure_node = node(
+      lambda: {"status": "RATE_LIMIT_RETRY_EXHAUSTED"},
+      name="rate_limit_failure_node")
 
   # 4. 构建闭环图结构
   edges = [
@@ -1575,6 +1739,42 @@ def initialize_agents(
       (prompt_node, solver_node),
       (solver_node, applier_node),
       (applier_node, fuzz_node),  # 闭环核心：补丁应用后触发重新编译
+      Edge(from_node=setup_node,
+           route="rate_limit",
+           to_node=rate_limit_recovery_node),
+      Edge(from_node=fuzz_node,
+           route="rate_limit",
+           to_node=rate_limit_recovery_node),
+      Edge(from_node=decision_node,
+           route="rate_limit",
+           to_node=rate_limit_recovery_node),
+      Edge(from_node=rsmc_node,
+           route="rate_limit",
+           to_node=rate_limit_recovery_node),
+      Edge(from_node=rollback_node,
+           route="rate_limit",
+           to_node=rate_limit_recovery_node),
+      Edge(from_node=finder_node,
+           route="rate_limit",
+           to_node=rate_limit_recovery_node),
+      Edge(from_node=prompt_node,
+           route="rate_limit",
+           to_node=rate_limit_recovery_node),
+      Edge(from_node=solver_node,
+           route="rate_limit",
+           to_node=rate_limit_recovery_node),
+      Edge(from_node=applier_node,
+           route="rate_limit",
+           to_node=rate_limit_recovery_node),
+      Edge(from_node=rate_limit_recovery_node,
+           route="setup",
+           to_node=setup_node),
+      Edge(from_node=rate_limit_recovery_node,
+           route="continue",
+           to_node=rsmc_node),
+      Edge(from_node=rate_limit_recovery_node,
+           route="exit",
+           to_node=rate_limit_failure_node),
       Edge(from_node=router_node, route="exit", to_node=success_node),
   ]
 
